@@ -8,7 +8,7 @@
       "data": {
         "type": "system",
         "subtype": "init",
-        "cwd": "/Users/jhoward/aai-ws/links/claude-agent-sdk-python/ipyant",
+        "cwd": "/Users/jhoward/aai-ws/links/claude-agent-sdk-python/ipyai",
         "session_id": "010ee6ee-844b-4754-9258-1f3d34ed3816",
         "tools": [],
         "mcp_servers": [],

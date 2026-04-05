@@ -1,20 +1,28 @@
-# ipyant
+# ipyai
 
-`ipyant` is a terminal IPython extension that supports Claude-backed prompt using the Agent SDK, so it supports Claude Code subscriptions as well as API keys.
+`ipyai` is a terminal IPython extension with three backends:
+
+- Claude Agent SDK (`claude-sdk`, default)
+- Claude API (`claude-api`)
+- Codex (`codex`)
 
 It is aimed at terminal IPython, not notebook frontends.
 
 ## Install
 
 ```bash
-pip install -e ipyant
+pip install -e ipyai
 ```
 
-`ipyant` uses the local Claude Code / Claude Agent SDK stack, so Claude must already be installed and authenticated on the machine. It also depends on `safepyrun` for the live `python` tool.
+`ipyai` uses `safepyrun` for live Python state. Backend requirements:
+
+- `claude-sdk`: local Claude Code / Agent SDK install and auth
+- `claude-api`: Anthropic API access
+- `codex`: local Codex app-server access
 
 ## How to Use Prompts
 
-There are several ways to send a prompt to Claude from ipyant:
+There are several ways to send a prompt to Claude from ipyai:
 
 **Dot prefix (`.`)** — In normal IPython mode, start any line with `.` to send it as a prompt. Everything after the dot is sent to Claude. Continuation lines (without a dot) are included too, so you can write multi-line prompts:
 
@@ -31,57 +39,64 @@ and failure cases
 **Prompt mode** — When prompt mode is on, *every* line you type is sent to Claude by default. To run normal Python code instead, prefix the line with `;`. Shell commands (`!`) and magics (`%`) still work as usual. There are three ways to enable prompt mode:
 
 - **`opt-p`** (Alt-p) — toggle prompt mode on/off at any time from the terminal
-- **`-p` flag** — start ipyant in prompt mode: `ipyant -p`
+- **`-p` flag** — start ipyai in prompt mode: `ipyai -p`
 - **`prompt_mode` config** — set `"prompt_mode": true` in `config.json` to always start in prompt mode
 
-You can also toggle prompt mode during a session with `%ipyant prompt`.
+You can also toggle prompt mode during a session with `%ipyai prompt`.
 
 ## CLI
 
 ```bash
-ipyant
+ipyai
+ipyclaude
+ipycodex
 ```
 
 Flags:
 
 ```bash
-ipyant -r        # resume last session
-ipyant -r 43     # resume session 43
-ipyant -l file   # load a saved notebook session
-ipyant -p        # start in prompt mode
+ipyai -r                 # resume last session for the selected backend
+ipyai -r 43              # resume session 43
+ipyai -l session.ipynb   # load a saved notebook session at startup
+ipyai -b codex           # select backend: claude-sdk | claude-api | codex
+ipyai -p                 # start in prompt mode
 ```
 
-On exit, `ipyant` prints the session ID so you can resume later.
+`ipyclaude` is equivalent to `ipyai -b claude-api`.
+
+`ipycodex` is equivalent to `ipyai -b codex`.
+
+On exit, `ipyai` prints the session ID so you can resume later.
 
 ## Load As Extension
 
 ```python
-%load_ext ipyant
+%load_ext ipyai
 ```
 
 ## Usage
 
-`ipyant` is a normal IPython session — you can run Python code exactly as you would in plain IPython. On top of that, you can send prompts to Claude as described above. `%ipyant` / `%%ipyant` magics are also available.
+`ipyai` is a normal IPython session — you can run Python code exactly as you would in plain IPython. On top of that, you can send prompts to Claude as described above. `%ipyai` / `%%ipyai` magics are also available.
 
 Useful commands:
 
 ```python
-%ipyant
-%ipyant model sonnet
-%ipyant completion_model haiku
-%ipyant think m
-%ipyant code_theme monokai
-%ipyant log_exact true
-%ipyant prompt
-%ipyant save mysession
-%ipyant load mysession
-%ipyant sessions
-%ipyant reset
+%ipyai
+%ipyai model sonnet
+%ipyai completion_model haiku
+%ipyai think m
+%ipyai code_theme monokai
+%ipyai log_exact true
+%ipyai prompt
+%ipyai save mysession
+%ipyai load mysession
+%ipyai sessions
+%ipyai reset
 ```
 
 ## Context Model
 
-For each AI prompt, `ipyant` sends:
+For each AI prompt, `ipyai` sends:
 
 - recent IPython code as `<code>`
 - string-literal note cells as `<note>`
@@ -90,13 +105,19 @@ For each AI prompt, `ipyant` sends:
 - referenced live variables as `<variable>`
 - referenced shell command output as `<shell>`
 
-Prompts are stored in SQLite in a dedicated `claude_prompts` table. Claude-native session metadata is stored in IPython's `sessions.remark` as JSON, including `cwd`, `provider`, and `provider_session_id`.
+Prompts are stored in SQLite in a dedicated `claude_prompts` table. Session metadata is stored in IPython's `sessions.remark` JSON, including `cwd`, `backend`, and `provider_session_id`.
 
 ## Tools
 
-`ipyant` exposes exactly one custom tool:
+`ipyai` exposes the same custom tools across all backends:
 
-- `python`: delegates to `pyrun` in the live IPython namespace
+- `pyrun`: run Python in the live IPython namespace
+- `bash`: run an allowed shell command via `safecmd`
+- `start_bgterm`: start a persistent shell session
+- `write_stdin`: send input to a persistent shell session and read output
+- `close_bgterm`: close a persistent shell session
+- `lnhashview_file`: view hash-addressed file lines for verified edits
+- `exhash_file`: apply verified hash-addressed edits to a file
 
 It also enables these built-in Claude Code tools:
 
@@ -108,22 +129,31 @@ It also enables these built-in Claude Code tools:
 - `WebSearch`
 - `Write`
 
-The `ipyant` CLI loads `safepyrun` before `ipyant`, so `pyrun` is available by default in normal terminal use.
+The `ipyai` CLI loads `safepyrun` before `ipyai`, so `pyrun` is available by default in normal terminal use.
+`bash`, `start_bgterm`, `write_stdin`, `close_bgterm`, `lnhashview_file`, and `exhash_file` are seeded into the user namespace by `ipyai`.
 
 ## Skills
 
-Skills are Claude-native. `ipyant` enables the built-in `Skill` tool and loads normal Claude user/project skills through the Agent SDK.
+Skills are Claude-native. `ipyai` enables the built-in `Skill` tool and loads normal Claude user/project skills through the Agent SDK.
 
 ## Notebook Save/Load
 
-`%ipyant save <filename>` writes a notebook snapshot. It stores:
+`%ipyai save <filename>` writes a notebook snapshot. It stores:
 
 - code cells
 - note cells
 - AI responses as markdown cells
 - prompt metadata including both `prompt` and `full_prompt`
 
-`%ipyant load <filename>` restores that notebook into a fresh session. On the next prompt after such a load, `ipyant` synthesizes a Claude transcript JSONL file once, stores the resulting Claude session ID, and then resumes natively from that point onward.
+`%ipyai load <filename>` restores that notebook into a fresh session.
+
+`ipyai -l <filename>` does the same during startup.
+
+Backend restore is backend-specific:
+
+- `claude-sdk`: synthesizes a Claude transcript once, then resumes natively
+- `claude-api`: reuses the saved local prompt history directly on each turn
+- `codex`: starts a fresh thread and sends the loaded notebook as XML context once
 
 ## Keyboard Shortcuts
 
@@ -136,7 +166,7 @@ Skills are Claude-native. `ipyant` enables the built-in `Skill` tool and loads n
 
 ## Config
 
-Config lives under `XDG_CONFIG_HOME/ipyant/`:
+Config lives under `XDG_CONFIG_HOME/ipyai/`:
 
 - `config.json`
 - `sysp.txt`

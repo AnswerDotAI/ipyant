@@ -8,6 +8,8 @@ from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ClaudeSDKClie
 from claude_agent_sdk import ToolResultBlock, ToolUseBlock, UserMessage, create_sdk_mcp_server, tool
 from claude_agent_sdk._internal.sessions import _get_project_dir
 
+from .tooling import available_tool_names, sdk_mcp_tools
+
 
 BUILTIN_TOOLS = ["Bash", "Edit", "Read", "Skill", "WebFetch", "WebSearch", "Write"]
 _THINK_MAP = dict(l="low", m="medium", h="high")
@@ -126,43 +128,34 @@ def write_synthetic_session(project_root: str | Path, turns: Iterable, session_i
 
 
 class ClaudeBackend:
+    formatter_cls = AsyncStreamFormatter
+
     def __init__(self, shell=None, cwd=None, system_prompt="", plugin_dirs=None, cli_path=None):
         self.shell = shell
         self.cwd = str(Path(cwd or os.getcwd()).resolve())
         self.system_prompt = system_prompt
         self.plugin_dirs = [str(Path(o).resolve()) for o in (plugin_dirs or [])]
         self.cli_path = cli_path
-        self._python_server = None
+        self._tool_server = None
+
+    @property
+    def ns(self): return getattr(self.shell, "user_ns", {})
 
     def _sdk_server(self):
-        if self._python_server is not None: return self._python_server
-        ns = self.shell.user_ns
-
-        async def _call_ns_tool(name, *args, **kwargs):
-            fn = ns.get(name)
-            if not callable(fn): raise NameError(f"{name!r} is not defined in the active IPython namespace")
-            return await fn(*args, **kwargs)
-
-        @tool("python", "Execute Python in the active IPython namespace", {"code": str})
-        async def python_tool(args):
-            code = args["code"]
-            try:
-                try: result = await _call_ns_tool("pyrun", code=code)
-                except TypeError: result = await _call_ns_tool("pyrun", code)
-                text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
-                return dict(content=[dict(type="text", text=text)])
-            except Exception as e: return dict(content=[dict(type="text", text=f"Error: {e}")], is_error=True)
-
-        self._python_server = create_sdk_mcp_server(name="ipyant", tools=[python_tool])
-        return self._python_server
+        if self._tool_server is not None: return self._tool_server or None
+        tools = sdk_mcp_tools(self.ns, tool)
+        self._tool_server = create_sdk_mcp_server(name="ipyai", tools=tools) if tools else False
+        return self._tool_server or None
 
     def _options(self, *, model, think=None, resume=None, include_partial_messages=True, allow_tools=True):
         tools = BUILTIN_TOOLS if allow_tools else []
-        allowed_tools = [*BUILTIN_TOOLS, "mcp__ipy__python"] if allow_tools else []
+        custom = [f"mcp__ipy__{o}" for o in available_tool_names(self.ns)] if allow_tools else []
+        server = self._sdk_server() if allow_tools else None
+        allowed_tools = [*BUILTIN_TOOLS, *custom] if allow_tools else []
         plugins = [dict(type="local", path=o) for o in self.plugin_dirs]
         return ClaudeAgentOptions(model=model, cwd=self.cwd, cli_path=self.cli_path, system_prompt=self.system_prompt, tools=tools,
             allowed_tools=allowed_tools, include_partial_messages=include_partial_messages, continue_conversation=bool(resume), resume=resume,
-            effort=_effort(think), setting_sources=["user", "project"], mcp_servers={"ipy": self._sdk_server()} if allow_tools else {},
+            effort=_effort(think), setting_sources=["user", "project"], mcp_servers={"ipy": server} if server else {},
             plugins=plugins)
 
     async def complete(self, prompt, *, model):
@@ -175,9 +168,9 @@ class ClaudeBackend:
                     parts += [block.text for block in message.content if isinstance(block, TextBlock)]
             return FullResponse("".join(parts).strip())
 
-    async def stream_turn(self, prompt, *, model, think="l", resume=None, state=None):
+    async def stream_turn(self, prompt, *, model, think="l", session_id=None, records=None, events=None, state=None):
         state = state if state is not None else {}
-        options = self._options(model=model, think=think, resume=resume, include_partial_messages=True, allow_tools=True)
+        options = self._options(model=model, think=think, resume=session_id, include_partial_messages=True, allow_tools=True)
         async with ClaudeSDKClient(options=options) as client:
             await client.query(prompt)
             thinking_open = False
@@ -224,6 +217,17 @@ class ClaudeBackend:
                 if isinstance(message, ResultMessage):
                     state["session_id"] = message.session_id
                     continue
+
+    async def bootstrap_session(self, *, model, think="l", session_id=None, records=None, events=None, state=None):
+        if session_id: return session_id
+        turns = [(full_prompt, response) for _,_,full_prompt,response,_ in records or []]
+        if not turns: return None
+        info = write_synthetic_session(self.cwd, turns)
+        if state is not None: state["session_id"] = info.session_id
+        return info.session_id
+
+
+ClaudeSDKBackend = ClaudeBackend
 
 
 class AsyncChat:

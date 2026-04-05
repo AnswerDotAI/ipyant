@@ -1,16 +1,9 @@
-import asyncio, os, shutil, sqlite3, tempfile
-from pathlib import Path
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
-TEST_HOME = Path(tempfile.mkdtemp(prefix="ipyant-tests-"))
-os.environ["XDG_CONFIG_HOME"] = str(TEST_HOME/"xdg")
-os.environ["CLAUDE_CONFIG_DIR"] = str(TEST_HOME/"claude")
-os.environ["IPYTHONDIR"] = str(TEST_HOME/"ipython")
-
-import ipyant.core as core
-from ipyant.claude_client import FullResponse
+import ipyai.core as core
 
 
 class DummyDisplayPublisher:
@@ -64,7 +57,7 @@ class DummyShell:
         self.display_pub = DummyDisplayPublisher()
         self.execution_count = 1
         self.ran_cells = []
-        self.loop_runner = asyncio.run
+        self.loop_runner = None
         self.prompts = SimpleNamespace(in_prompt_tokens=lambda: [])
 
     def register_magics(self, magics): self.magics.append(magics)
@@ -72,50 +65,26 @@ class DummyShell:
 
     def run_cell(self, source, store_history=False):
         self.ran_cells.append((source, store_history))
-        result = None
-        try:
-            tree = compile(source, f"<cell-{self.execution_count}>", "exec")
-            exec(tree, self.user_ns)
+        try: exec(compile(source, f"<cell-{self.execution_count}>", "exec"), self.user_ns)
         except Exception as e: return SimpleNamespace(success=False, error_in_exec=e, result=None)
         if store_history:
             self.history_manager.add(self.execution_count, source)
             self.execution_count += 1
-        return SimpleNamespace(success=True, result=result, error_in_exec=None, error_before_exec=None)
+        return SimpleNamespace(success=True, result=None, error_in_exec=None, error_before_exec=None)
 
     async def run_cell_async(self, source, store_history=False, transformed_cell=None):
         return self.run_cell(transformed_cell or source, store_history=store_history)
 
 
-class FakeBackend:
-    calls = []
-
-    def __init__(self, shell=None, cwd=None, system_prompt="", plugin_dirs=None, cli_path=None):
-        self.shell,self.cwd,self.system_prompt = shell,cwd,system_prompt
-
-    async def complete(self, prompt, *, model): return FullResponse(" + completion")
-
-    async def stream_turn(self, prompt, *, model, think="l", resume=None, state=None):
-        type(self).calls.append(dict(prompt=prompt, model=model, think=think, resume=resume, cwd=self.cwd))
-        state["session_id"] = resume or f"fake-session-{len(type(self).calls)}"
-        yield {"kind": "thinking_start"}
-        yield {"kind": "thinking_delta", "delta": "working"}
-        yield {"kind": "thinking_end"}
-        if "factor" in prompt.lower():
-            yield dict(kind="tool_start", id="t1", name="python", input={"code": "2*2*3*5"})
-            yield dict(kind="tool_complete", id="t1", name="python", input={"code": "2*2*3*5"}, content="60", is_error=False)
-            yield "60 = 2 * 2 * 3 * 5"
-        else: yield "60"
-
-
 @pytest.fixture(autouse=True)
-def _test_env(tmp_path):
-    old = Path.cwd()
-    os.chdir(tmp_path)
-    if core.CONFIG_DIR.exists(): shutil.rmtree(core.CONFIG_DIR)
-    core.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    FakeBackend.calls = []
-    try: yield
-    finally: os.chdir(old)
+def temp_core_paths(tmp_path, monkeypatch):
+    cfg = tmp_path/"config"
+    cfg.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(core, "CONFIG_DIR", cfg)
+    monkeypatch.setattr(core, "CONFIG_PATH", cfg/"config.json")
+    monkeypatch.setattr(core, "SYSP_PATH", cfg/"sysp.txt")
+    monkeypatch.setattr(core, "LOG_PATH", cfg/"exact-log.jsonl")
+    yield
 
 
 @pytest.fixture

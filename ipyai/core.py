@@ -14,7 +14,8 @@ from rich.file_proxy import FileProxy
 from rich.live import Live
 from rich.markdown import Markdown, TableDataElement
 
-from .claude_client import AsyncChat, AsyncStreamFormatter, ClaudeBackend, write_synthetic_session
+from .backends import DEFAULT_BACKEND, backend_spec, normalize_backend_name
+from .claude_client import AsyncStreamFormatter as ClaudeAsyncStreamFormatter
 
 
 FileProxy.isatty = lambda self: self.rich_proxied_file.isatty()
@@ -27,13 +28,13 @@ def _tde_on_text(self, context, text):
 
 TableDataElement.on_text = _tde_on_text
 
-DEFAULT_MODEL = "sonnet"
-DEFAULT_COMPLETION_MODEL = "haiku"
+DEFAULT_MODEL = backend_spec(DEFAULT_BACKEND).default_model
+DEFAULT_COMPLETION_MODEL = backend_spec(DEFAULT_BACKEND).default_completion_model
 DEFAULT_THINK = "l"
 DEFAULT_CODE_THEME = "monokai"
 DEFAULT_LOG_EXACT = False
 DEFAULT_PROMPT_MODE = False
-DEFAULT_SYSTEM_PROMPT = """You are an AI assistant running inside terminal IPython through the ipyant extension.
+DEFAULT_SYSTEM_PROMPT = """You are an AI assistant running inside terminal IPython through the ipyai extension.
 
 The user may give you:
 - a `<context>` block containing recent executed Python code, outputs, and notes
@@ -44,21 +45,19 @@ The user may give you:
 Treat `<note>` blocks as user-authored context, not executable code.
 
 Use tools when they materially improve correctness:
-- use `python` when live IPython state matters
-- use `Read`, `Write`, `Edit`, and `Bash` for repository work
-- use `WebFetch` and `WebSearch` for web tasks
-- use Claude-native skills/plugins when helpful
+- use live Python tooling such as `pyrun` when interpreter state matters
+- use available shell/file tools for repository work
+- use web tools when fresh web context matters
 
 Respond concisely and practically. Markdown is rendered in a terminal with Rich."""
 _COMPLETION_SP = "You are a code completion engine for IPython. Return only the completion text to insert at the cursor."
 
-MAGIC_NAME = "ipyant"
+MAGIC_NAME = "ipyai"
 LAST_PROMPT = "_ai_last_prompt"
 LAST_RESPONSE = "_ai_last_response"
-EXTENSION_NS = "_ipyant"
-EXTENSION_ATTR = "_ipyant_extension"
-RESET_LINE_NS = "_ipyant_reset_line"
-LOADED_HISTORY_NS = "_ipyant_loaded_notebook_history"
+EXTENSION_NS = "_ipyai"
+EXTENSION_ATTR = "_ipyai_extension"
+RESET_LINE_NS = "_ipyai_reset_line"
 PROMPTS_TABLE = "claude_prompts"
 PROMPTS_COLS = ["id", "session", "prompt", "full_prompt", "response", "history_line"]
 _PROMPTS_SQL = f"""CREATE TABLE IF NOT EXISTS {PROMPTS_TABLE} (
@@ -68,24 +67,24 @@ _PROMPTS_SQL = f"""CREATE TABLE IF NOT EXISTS {PROMPTS_TABLE} (
     full_prompt TEXT NOT NULL,
     response TEXT NOT NULL,
     history_line INTEGER NOT NULL DEFAULT 0)"""
-CONFIG_DIR = xdg_config_home()/"ipyant"
+CONFIG_DIR = xdg_config_home()/"ipyai"
 CONFIG_PATH = CONFIG_DIR/"config.json"
 SYSP_PATH = CONFIG_DIR/"sysp.txt"
 LOG_PATH = CONFIG_DIR/"exact-log.jsonl"
 
 __all__ = """DEFAULT_MODEL DEFAULT_COMPLETION_MODEL IPyAIExtension LAST_PROMPT LAST_RESPONSE create_extension
 load_ipython_extension unload_ipython_extension prompt_from_lines transform_dots transform_prompt_mode
-astream_to_stdout write_synthetic_session CONFIG_PATH SYSP_PATH LOG_PATH""".split()
+astream_to_stdout CONFIG_PATH SYSP_PATH LOG_PATH""".split()
 
 _prompt_template = "{context}<user-request>{prompt}</user-request>"
 _var_re = re.compile(r"\$`(\w+(?:\([^`]*\))?)`")
 _shell_re = re.compile(r"(?<![\w`])!`([^`]+)`")
-_status_attrs = "model completion_model think code_theme log_exact prompt_mode".split()
+_status_attrs = "backend model completion_model think code_theme log_exact prompt_mode".split()
 SOLVEIT_REPLY_SEP = "\n\n##### 🤖Reply🤖<!-- SOLVEIT_SEPARATOR_7f3a9b2c -->\n\n"
 SOLVEIT_MODE_KEY = "solveit_dialog_mode"
 SOLVEIT_VER_KEY = "solveit_ver"
 _CWD_KEY = "cwd"
-_PROVIDER_KEY = "provider"
+_BACKEND_KEY = "backend"
 _PROVIDER_SESSION_KEY = "provider_session_id"
 
 
@@ -127,9 +126,9 @@ def _tag(name, content="", **attrs):
     return f"<{name}{ats}>{content}</{name}>"
 
 
-def _is_ipyant_input(source):
+def _is_ipyai_input(source):
     src = source.lstrip()
-    return src.startswith(".") or src.startswith("%ipyant") or src.startswith("%%ipyant")
+    return src.startswith(".") or src.startswith("%ipyai") or src.startswith("%%ipyai")
 
 
 def _is_note(source):
@@ -248,7 +247,7 @@ async def _astream_to_live_markdown(chunks, out, code_theme, formatter=None, par
     return getattr(formatter, "final_text", text)
 
 
-async def astream_to_stdout(stream, formatter_cls: Callable[..., AsyncStreamFormatter]=AsyncStreamFormatter, out=None,
+async def astream_to_stdout(stream, formatter_cls: Callable[..., ClaudeAsyncStreamFormatter]=ClaudeAsyncStreamFormatter, out=None,
     code_theme=DEFAULT_CODE_THEME, partial=None, console_cls=Console, markdown_cls=Markdown, live_cls=Live):
     out = sys.stdout if out is None else out
     fmt = formatter_cls()
@@ -298,8 +297,12 @@ def _suppress_output_history(shell):
     finally: pub._is_publishing = old
 
 
-def _default_config():
-    return dict(model=os.environ.get("IPYANT_MODEL", DEFAULT_MODEL), completion_model=DEFAULT_COMPLETION_MODEL, think=DEFAULT_THINK,
+def _default_config(): return _default_config_for(DEFAULT_BACKEND)
+
+
+def _default_config_for(backend_name):
+    spec = backend_spec(backend_name)
+    return dict(model=os.environ.get("IPYAI_MODEL", spec.default_model), completion_model=spec.default_completion_model, think=DEFAULT_THINK,
         code_theme=DEFAULT_CODE_THEME, log_exact=DEFAULT_LOG_EXACT, prompt_mode=DEFAULT_PROMPT_MODE)
 
 
@@ -309,22 +312,42 @@ def _ensure_config_dir(path=None):
     return path.parent
 
 
-def load_config(path=None):
+def load_config(path=None, backend_name=DEFAULT_BACKEND):
     path = Path(path or CONFIG_PATH)
     _ensure_config_dir(path)
-    cfg = _default_config()
+    cfg = _default_config_for(backend_name)
     if path.exists():
         data = json.loads(path.read_text())
         if not isinstance(data, dict): raise ValueError(f"Invalid config format in {path}")
         cfg.update({k:v for k,v in data.items() if k in cfg})
     else: path.write_text(json.dumps(cfg, indent=2) + "\n")
-    cfg["model"] = str(cfg["model"]).strip() or DEFAULT_MODEL
-    cfg["completion_model"] = str(cfg["completion_model"]).strip() or DEFAULT_COMPLETION_MODEL
+    spec = backend_spec(backend_name)
+    cfg["model"] = str(cfg["model"]).strip() or spec.default_model
+    cfg["completion_model"] = str(cfg["completion_model"]).strip() or spec.default_completion_model
     cfg["think"] = _validate_level("think", cfg["think"], DEFAULT_THINK)
     cfg["code_theme"] = str(cfg["code_theme"]).strip() or DEFAULT_CODE_THEME
     cfg["log_exact"] = _validate_bool("log_exact", cfg["log_exact"], DEFAULT_LOG_EXACT)
     cfg["prompt_mode"] = _validate_bool("prompt_mode", cfg["prompt_mode"], DEFAULT_PROMPT_MODE)
     return cfg
+
+
+def _ensure_default_user_tools(shell):
+    ns = getattr(shell, "user_ns", {})
+    try:
+        from safecmd import bash
+        ns.setdefault("bash", bash)
+    except Exception: pass
+    try:
+        from bgterm import close_bgterm, start_bgterm, write_stdin
+        ns.setdefault("start_bgterm", start_bgterm)
+        ns.setdefault("write_stdin", write_stdin)
+        ns.setdefault("close_bgterm", close_bgterm)
+    except Exception: pass
+    try:
+        from exhash import exhash_file, lnhashview_file
+        ns.setdefault("lnhashview_file", lnhashview_file)
+        ns.setdefault("exhash_file", exhash_file)
+    except Exception: pass
 
 
 def load_sysp(path=None):
@@ -347,23 +370,23 @@ def _event_to_cell(o):
         source = o.get("source", "")
         if _is_note(source):
             return dict(id=_cell_id(), cell_type="markdown", source=_note_str(source),
-                metadata=dict(ipyant=dict(kind="code", line=o.get("line", 0), source=source)))
-        return dict(id=_cell_id(), cell_type="code", source=source, metadata=dict(ipyant=dict(kind="code", line=o.get("line", 0))),
+                metadata=dict(ipyai=dict(kind="code", line=o.get("line", 0), source=source)))
+        return dict(id=_cell_id(), cell_type="code", source=source, metadata=dict(ipyai=dict(kind="code", line=o.get("line", 0))),
             outputs=[], execution_count=None)
     if o.get("kind") == "prompt":
         meta = dict(kind="prompt", line=o.get("line", 0), history_line=o.get("history_line", 0), prompt=o.get("prompt", ""),
             full_prompt=o.get("full_prompt", ""))
         source = o.get("prompt", "") + SOLVEIT_REPLY_SEP + o.get("response", "")
-        return dict(id=_cell_id(), cell_type="markdown", source=source, metadata=dict(ipyant=meta, solveit_ai=True))
+        return dict(id=_cell_id(), cell_type="markdown", source=source, metadata=dict(ipyai=meta, solveit_ai=True))
 
 
 def _cell_to_event(cell):
     if cell.get("metadata", {}).get("solveit_ai"):
-        meta = cell.get("metadata", {}).get("ipyant", {})
+        meta = cell.get("metadata", {}).get("ipyai", {})
         prompt,response = _split_solveit_prompt(cell.get("source", ""))
         return dict(kind="prompt", line=meta.get("line", 0), history_line=meta.get("history_line", 0), prompt=meta.get("prompt", prompt),
             full_prompt=meta.get("full_prompt", ""), response=response)
-    meta = cell.get("metadata", {}).get("ipyant", {})
+    meta = cell.get("metadata", {}).get("ipyai", {})
     kind = meta.get("kind")
     if kind == "code":
         source = meta.get("source") or cell.get("source", "")
@@ -434,16 +457,16 @@ _LIST_SQL = f"""SELECT s.session, s.start, s.end, s.num_cmds,
     (SELECT prompt FROM {PROMPTS_TABLE} WHERE session=s.session ORDER BY id DESC LIMIT 1)
     FROM sessions s
     WHERE CASE WHEN json_valid(s.remark) THEN json_extract(s.remark, '$.{_CWD_KEY}') END{{w}}
-      AND (CASE WHEN json_valid(s.remark) THEN json_extract(s.remark, '$.{_PROVIDER_KEY}') END='claude'
-        OR EXISTS (SELECT 1 FROM {PROMPTS_TABLE} p WHERE p.session=s.session))
+      AND CASE WHEN json_valid(s.remark) THEN json_extract(s.remark, '$.{_BACKEND_KEY}') END=?
     ORDER BY s.session DESC LIMIT 20"""
 
 
-def _list_sessions(db, cwd):
-    rows = db.execute(_LIST_SQL.format(w="=?"), (cwd,)).fetchall()
+def _list_sessions(db, cwd, backend_name):
+    _ensure_ai_tables(db)
+    rows = db.execute(_LIST_SQL.format(w="=?"), (cwd, backend_name)).fetchall()
     if not rows:
         repo = _git_repo_root(cwd)
-        if repo and repo != cwd: rows = db.execute(_LIST_SQL.format(w="=?"), (repo,)).fetchall()
+        if repo and repo != cwd: rows = db.execute(_LIST_SQL.format(w="=?"), (repo, backend_name)).fetchall()
     return rows
 
 
@@ -459,11 +482,14 @@ def _pick_session(rows):
     return radiolist_dialog(title="Resume session", text="Select a session to resume:", values=values, default=values[0][0]).run()
 
 
-def resume_session(shell, session_id):
+def resume_session(shell, session_id, backend_name=None):
     hm = shell.history_manager
     fresh_id = hm.session_number
-    row = hm.db.execute("SELECT session FROM sessions WHERE session=?", (session_id,)).fetchone()
+    row = hm.db.execute("SELECT session, remark FROM sessions WHERE session=?", (session_id,)).fetchone()
     if not row: raise ValueError(f"Session {session_id} not found")
+    if backend_name and _session_meta(row[1]).get(_BACKEND_KEY) != backend_name:
+        found = _session_meta(row[1]).get(_BACKEND_KEY) or "unknown"
+        raise ValueError(f"Session {session_id} uses backend {found!r}, not {backend_name!r}")
     with hm.db:
         hm.db.execute("DELETE FROM sessions WHERE session=?", (fresh_id,))
         hm.db.execute("UPDATE sessions SET end=NULL WHERE session=?", (session_id,))
@@ -481,25 +507,32 @@ class AIMagics(Magics):
         self.ext = ext
 
     @line_magic(MAGIC_NAME)
-    def ipyant_line(self, line=""): return self.ext.handle_line(line)
+    def ipyai_line(self, line=""): return self.ext.handle_line(line)
 
     @cell_magic(MAGIC_NAME)
-    async def ipyant_cell(self, line="", cell=None): await self.ext.run_prompt(cell)
+    async def ipyai_cell(self, line="", cell=None): await self.ext.run_prompt(cell)
 
 
 class IPyAIExtension:
     def __init__(self, shell, model=None, completion_model=None, think=None, code_theme=None, log_exact=None, system_prompt=None,
-        prompt_mode=None, backend_factory=ClaudeBackend):
-        self.shell,self.loaded,self.backend_factory = shell,False,backend_factory
-        cfg = load_config(CONFIG_PATH)
+        prompt_mode=None, backend_name=None, backend_factory=None):
+        self.shell,self.loaded = shell,False
+        self.backend_name = normalize_backend_name(backend_name or os.environ.get("IPYAI_DEFAULT_BACKEND") or DEFAULT_BACKEND)
+        self.backend_spec = backend_spec(self.backend_name)
+        self.backend_factory = backend_factory or self.backend_spec.factory
+        cfg = load_config(CONFIG_PATH, backend_name=self.backend_name)
         self.prompt_mode = cfg["prompt_mode"] ^ bool(prompt_mode)
-        self.model = model or cfg["model"]
-        self.completion_model = completion_model or cfg["completion_model"]
+        self.model = model or cfg["model"] or self.backend_spec.default_model
+        self.completion_model = completion_model or cfg["completion_model"] or self.backend_spec.default_completion_model
         self.think = _validate_level("think", think if think is not None else cfg["think"], DEFAULT_THINK)
         self.code_theme = str(code_theme or cfg["code_theme"]).strip() or DEFAULT_CODE_THEME
         self.log_exact = _validate_bool("log_exact", log_exact if log_exact is not None else cfg["log_exact"], DEFAULT_LOG_EXACT)
         self.system_prompt = system_prompt if system_prompt is not None else load_sysp(SYSP_PATH)
         self.plugin_dirs = _discover_plugin_dirs(os.getcwd())
+        _ensure_default_user_tools(shell)
+
+    @property
+    def backend(self): return self.backend_name
 
     @property
     def history_manager(self): return getattr(self.shell, "history_manager", None)
@@ -515,11 +548,15 @@ class IPyAIExtension:
         hm = self.history_manager
         return None if hm is None else hm.db
 
+    def make_backend(self, system_prompt=None):
+        return self.backend_factory(shell=self.shell, cwd=os.getcwd(), system_prompt=self.system_prompt if system_prompt is None else system_prompt,
+            plugin_dirs=self.plugin_dirs)
+
     def ensure_tables(self): _ensure_ai_tables(self.db)
 
     def _ensure_session_row(self):
         if self.db is None: return
-        with self.db: _update_session_remark(self.db, self.session_number, cwd=os.getcwd())
+        with self.db: _update_session_remark(self.db, self.session_number, cwd=os.getcwd(), backend=self.backend_name)
 
     def prompt_records(self, session=None):
         if self.db is None: return []
@@ -549,7 +586,7 @@ class IPyAIExtension:
         parts = []
         for _,line,pair in self.code_history(start, stop):
             source,output = pair
-            if not source or _is_ipyant_input(source): continue
+            if not source or _is_ipyai_input(source): continue
             if _is_note(source): parts.append(_tag("note", _note_str(source)))
             else:
                 parts.append(_tag("code", source))
@@ -574,7 +611,7 @@ class IPyAIExtension:
         events = []
         for _,line,pair in self.full_history():
             source,_ = pair
-            if not source or _is_ipyant_input(source): continue
+            if not source or _is_ipyai_input(source): continue
             events.append(dict(kind="code", line=line, source=source))
         for pid,prompt,full_prompt,response,history_line in self.prompt_records():
             events.append(dict(kind="prompt", id=pid, line=history_line+1, history_line=history_line, prompt=prompt, full_prompt=full_prompt, response=response))
@@ -584,7 +621,7 @@ class IPyAIExtension:
         path = Path(path)
         if path.suffix != ".ipynb": path = path.with_suffix(".ipynb")
         events = [{k:v for k,v in o.items() if k != "id"} for o in self.startup_events()]
-        nb = dict(cells=[_event_to_cell(e) for e in events], metadata=dict(ipyant_version=1, solveit_ver=2, solveit_dialog_mode="standard"),
+        nb = dict(cells=[_event_to_cell(e) for e in events], metadata=dict(ipyai_version=1, solveit_ver=2, solveit_dialog_mode="standard"),
             nbformat=4, nbformat_minor=5)
         path.write_text(json.dumps(nb, indent=2) + "\n")
         return path, sum(o["kind"] == "code" for o in events), sum(o["kind"] == "prompt" for o in events)
@@ -609,7 +646,6 @@ class IPyAIExtension:
                 self.save_prompt(o.get("prompt", ""), o.get("full_prompt", ""), o.get("response", ""), history_line)
                 self._advance_execution_count()
                 nprompt += 1
-        if nprompt: self.shell.user_ns[LOADED_HISTORY_NS] = True
         return path, ncode, nprompt
 
     def log_exact_exchange(self, prompt, response):
@@ -622,10 +658,9 @@ class IPyAIExtension:
         self.ensure_tables()
         with self.db:
             cur = self.db.execute(f"DELETE FROM {PROMPTS_TABLE} WHERE session=?", (self.session_number,))
-            _update_session_remark(self.db, self.session_number, cwd=os.getcwd(), provider=None, provider_session_id=None)
+            _update_session_remark(self.db, self.session_number, cwd=os.getcwd(), backend=self.backend_name, provider_session_id=None)
         self.shell.user_ns.pop(LAST_PROMPT, None)
         self.shell.user_ns.pop(LAST_RESPONSE, None)
-        self.shell.user_ns.pop(LOADED_HISTORY_NS, None)
         self.shell.user_ns[RESET_LINE_NS] = self.current_prompt_line()
         return cur.rowcount or 0
 
@@ -634,21 +669,11 @@ class IPyAIExtension:
         row = self.db.execute("SELECT remark FROM sessions WHERE session=?", (self.session_number,)).fetchone()
         if not row: return None
         meta = _session_meta(row[0])
-        return meta.get(_PROVIDER_SESSION_KEY) if meta.get(_PROVIDER_KEY) == "claude" else None
+        return meta.get(_PROVIDER_SESSION_KEY) if meta.get(_BACKEND_KEY) == self.backend_name else None
 
     def set_provider_session(self, session_id):
         if self.db is None or not session_id: return
-        with self.db: _update_session_remark(self.db, self.session_number, cwd=os.getcwd(), provider="claude", provider_session_id=session_id)
-        self.shell.user_ns.pop(LOADED_HISTORY_NS, None)
-
-    def _synthesize_loaded_history(self):
-        if not self.shell.user_ns.get(LOADED_HISTORY_NS): return None
-        records = self.prompt_records()
-        if not records: return None
-        turns = [(full_prompt, response) for _,_,full_prompt,response,_ in records]
-        info = write_synthetic_session(os.getcwd(), turns)
-        self.set_provider_session(info.session_id)
-        return info.session_id
+        with self.db: _update_session_remark(self.db, self.session_number, cwd=os.getcwd(), backend=self.backend_name, provider_session_id=session_id)
 
     def _register_keybindings(self):
         pt_app = getattr(self.shell, "pt_app", None)
@@ -737,9 +762,7 @@ class IPyAIExtension:
         if suffix.strip(): parts.append(f"<suffix>{suffix}</suffix>")
         parts.append("</current-input>")
         parts.append("Return only the completion text to insert immediately after the prefix.")
-        chat = AsyncChat(model=self.completion_model, sp=_COMPLETION_SP, backend_factory=self.backend_factory, shell=self.shell, cwd=os.getcwd(),
-            plugin_dirs=self.plugin_dirs)
-        res = await chat("\n".join(parts))
+        res = await self.make_backend(system_prompt=_COMPLETION_SP).complete("\n".join(parts), model=self.completion_model)
         return (res.content or "").strip()
 
     def _patch_lexer(self):
@@ -752,7 +775,7 @@ class IPyAIExtension:
         def _lex_document(self, document):
             text = document.text.lstrip()
             if ext.prompt_mode and not text.startswith((";", "!", "%")): return plain.lex_document(document)
-            if text.startswith(".") or text.startswith("%%ipyant"): return plain.lex_document(document)
+            if text.startswith(".") or text.startswith("%%ipyai"): return plain.lex_document(document)
             return orig(self, document)
 
         IPythonPTLexer.lex_document = _lex_document
@@ -824,7 +847,7 @@ class IPyAIExtension:
             ("completion_model <name>", "Set completion model"), ("think <l|m|h>", "Set thinking level"), ("code_theme <name>", "Set code theme"),
             ("log_exact <bool>", "Set raw prompt/response logging"), ("prompt", "Toggle prompt mode"), ("save <file>", "Save session to .ipynb"),
             ("load <file>", "Load session from .ipynb"), ("reset", "Clear AI prompts from current session"), ("sessions", "List previous sessions")]
-        print("Usage: %ipyant <command>\n")
+        print("Usage: %ipyai <command>\n")
         for cmd,desc in cmds: print(f"  {cmd:22s} {desc}")
 
     def handle_line(self, line):
@@ -840,7 +863,7 @@ class IPyAIExtension:
             n = self.reset_session_history()
             return print(f"Deleted {n} AI prompts from session {self.session_number}.")
         if line == "sessions":
-            rows = _list_sessions(self.db, os.getcwd())
+            rows = _list_sessions(self.db, os.getcwd(), self.backend_name)
             if not rows: return print("No sessions found for this directory.")
             print(f"{'ID':>6}  {'Start':20}  {'Cmds':>5}  {'Last prompt'}")
             for sid,start,end,ncmds,remark,lp in rows: print(_fmt_session(sid, start, ncmds, lp))
@@ -848,28 +871,30 @@ class IPyAIExtension:
         cmd,_,arg = line.partition(" ")
         clean = arg.strip()
         if cmd == "save":
-            if not clean: return print("Usage: %ipyant save <filename>")
+            if not clean: return print("Usage: %ipyai save <filename>")
             path,ncode,nprompt = self.save_notebook(clean)
             return print(f"Saved {ncode} code cells and {nprompt} prompts to {path}.")
         if cmd == "load":
-            if not clean: return print("Usage: %ipyant load <filename>")
+            if not clean: return print("Usage: %ipyai load <filename>")
             try:
                 path,ncode,nprompt = self.load_notebook(clean)
                 return print(f"Loaded {ncode} code cells and {nprompt} prompts from {path}.")
             except FileNotFoundError as e: return print(str(e))
         if cmd == "help": return self._show_help()
         if clean:
-            vals = dict(model=lambda: clean, completion_model=lambda: clean or DEFAULT_COMPLETION_MODEL, code_theme=lambda: clean or DEFAULT_CODE_THEME,
+            vals = dict(model=lambda: clean, completion_model=lambda: clean or self.backend_spec.default_completion_model,
+                code_theme=lambda: clean or DEFAULT_CODE_THEME,
                 think=lambda: _validate_level("think", clean, self.think), log_exact=lambda: _validate_bool("log_exact", clean, self.log_exact))
             if cmd in vals: return self._set(cmd, vals[cmd]())
-        print(f"Unknown command: {line!r}. Run %ipyant help for available commands.")
+        print(f"Unknown command: {line!r}. Run %ipyai help for available commands.")
 
     async def run_prompt(self, prompt):
         prompt = (prompt or "").rstrip("\n")
         if not prompt.strip(): return None
         self._ensure_session_row()
         history_line = self.current_prompt_line()
-        records = [dict(prompt=p, history_line=hl) for _,p,_,_,hl in self.prompt_records()]
+        prompt_records = self.prompt_records()
+        records = [dict(prompt=p, history_line=hl) for _,p,_,_,hl in prompt_records]
         notes,prev_line = [],self.reset_line
         for o in records:
             notes += self.note_strings(prev_line+1, o["history_line"])
@@ -884,15 +909,18 @@ class IPyAIExtension:
         warnings = _tag("warnings", f"The following symbols were referenced but aren't defined in the interpreter: {', '.join(missing_vars)}") + "\n" if missing_vars else ""
         full_prompt = warnings + var_xml + shell_xml + self.format_prompt(prompt, self.last_prompt_line()+1, history_line+1)
         self.shell.user_ns[LAST_PROMPT] = prompt
-        provider_session = self.get_provider_session_id()
-        if provider_session is None: provider_session = self._synthesize_loaded_history()
-        backend = self.backend_factory(shell=self.shell, cwd=os.getcwd(), system_prompt=self.system_prompt, plugin_dirs=self.plugin_dirs)
+        events = self.startup_events()
+        backend = self.make_backend()
         state,partial = {},[]
-        stream = backend.stream_turn(full_prompt, model=self.model, think=self.think, resume=provider_session, state=state)
+        provider_session = await backend.bootstrap_session(model=self.model, think=self.think, session_id=self.get_provider_session_id(),
+            records=prompt_records, events=events, state=state)
+        stream = backend.stream_turn(full_prompt, model=self.model, think=self.think, session_id=provider_session, records=prompt_records, events=events,
+            state=state)
         loop,task = asyncio.get_running_loop(),asyncio.current_task()
         loop.add_signal_handler(signal.SIGINT, task.cancel)
         try:
-            with _suppress_output_history(self.shell): text = await astream_to_stdout(stream, code_theme=self.code_theme, partial=partial)
+            with _suppress_output_history(self.shell): text = await astream_to_stdout(stream, formatter_cls=backend.formatter_cls, code_theme=self.code_theme,
+                partial=partial)
         except asyncio.CancelledError:
             text = "".join(partial) + "\n<system>user interrupted</system>"
             print("\nstopped")
@@ -906,35 +934,45 @@ class IPyAIExtension:
         return None
 
 
-def create_extension(shell=None, resume=None, load=None, prompt_mode=False, **kwargs):
+def _resume_command(session_id, backend_name):
+    entry = os.environ.get("IPYAI_ENTRYPOINT", "ipyai")
+    default = normalize_backend_name(os.environ.get("IPYAI_DEFAULT_BACKEND") or DEFAULT_BACKEND)
+    backend_part = f" -b {backend_name}" if backend_name != default else ""
+    return f"{entry}{backend_part} -r {session_id}"
+
+
+def create_extension(shell=None, resume=None, file=None, prompt_mode=False, backend=None, **kwargs):
     shell = shell or get_ipython()
     if shell is None: raise RuntimeError("No active IPython shell found")
+    backend_name = normalize_backend_name(backend or os.environ.get("IPYAI_DEFAULT_BACKEND") or DEFAULT_BACKEND)
     _ensure_ai_tables(shell.history_manager.db)
     if resume is not None:
         if resume == -1:
-            rows = _list_sessions(shell.history_manager.db, os.getcwd())
-            if rows and (chosen := _pick_session(rows)): resume_session(shell, chosen)
+            rows = _list_sessions(shell.history_manager.db, os.getcwd(), backend_name)
+            if rows and (chosen := _pick_session(rows)): resume_session(shell, chosen, backend_name=backend_name)
             else: print("No sessions found for this directory.")
-        else: resume_session(shell, resume)
+        else: resume_session(shell, resume, backend_name=backend_name)
     ext = getattr(shell, EXTENSION_ATTR, None)
-    if ext is None: ext = IPyAIExtension(shell=shell, prompt_mode=prompt_mode, **kwargs)
+    if ext is not None and ext.backend_name != backend_name: ext.unload()
+    if ext is None or ext.backend_name != backend_name: ext = IPyAIExtension(shell=shell, prompt_mode=prompt_mode, backend_name=backend_name, **kwargs)
     if not ext.loaded: ext.load()
-    if load is not None:
+    if file is not None:
         try:
-            path,ncode,nprompt = ext.load_notebook(load)
+            path,ncode,nprompt = ext.load_notebook(file)
             print(f"Loaded {ncode} code cells and {nprompt} prompts from {path}.")
         except FileNotFoundError as e: print(str(e))
     ext._ensure_session_row()
-    if not getattr(shell, "_ipyant_atexit", False):
+    if not getattr(shell, "_ipyai_atexit", False):
         sid = shell.history_manager.session_number
-        atexit.register(lambda: print(f"\nTo resume: ipyant -r {sid}"))
-        shell._ipyant_atexit = True
+        atexit.register(lambda: print(f"\nTo resume: {_resume_command(sid, ext.backend_name)}"))
+        shell._ipyai_atexit = True
     return ext
 
 
 _ng_parser = argparse.ArgumentParser(add_help=False)
 _ng_parser.add_argument("-r", type=int, nargs="?", const=-1, default=None)
 _ng_parser.add_argument("-l", type=str, default=None)
+_ng_parser.add_argument("-b", type=str, default=None)
 _ng_parser.add_argument("-p", action="store_true", default=False)
 
 
@@ -946,7 +984,7 @@ def _parse_ng_flags():
 
 def load_ipython_extension(ipython):
     flags = _parse_ng_flags()
-    return create_extension(ipython, resume=flags.r, load=flags.l, prompt_mode=flags.p)
+    return create_extension(ipython, resume=flags.r, file=flags.l, prompt_mode=flags.p, backend=flags.b)
 
 
 def unload_ipython_extension(ipython):
