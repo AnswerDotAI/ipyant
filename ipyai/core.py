@@ -14,7 +14,7 @@ from rich.file_proxy import FileProxy
 from rich.live import Live
 from rich.markdown import Markdown, TableDataElement
 
-from .backends import DEFAULT_BACKEND, backend_spec, normalize_backend_name
+from .backends import BACKENDS, DEFAULT_BACKEND, backend_spec, normalize_backend_name
 from .claude_client import AsyncStreamFormatter as ClaudeAsyncStreamFormatter
 
 
@@ -28,8 +28,6 @@ def _tde_on_text(self, context, text):
 
 TableDataElement.on_text = _tde_on_text
 
-DEFAULT_MODEL = backend_spec(DEFAULT_BACKEND).default_model
-DEFAULT_COMPLETION_MODEL = backend_spec(DEFAULT_BACKEND).default_completion_model
 DEFAULT_THINK = "l"
 DEFAULT_CODE_THEME = "monokai"
 DEFAULT_LOG_EXACT = False
@@ -72,7 +70,7 @@ CONFIG_PATH = CONFIG_DIR/"config.json"
 SYSP_PATH = CONFIG_DIR/"sysp.txt"
 LOG_PATH = CONFIG_DIR/"exact-log.jsonl"
 
-__all__ = """DEFAULT_MODEL DEFAULT_COMPLETION_MODEL IPyAIExtension LAST_PROMPT LAST_RESPONSE create_extension
+__all__ = """IPyAIExtension LAST_PROMPT LAST_RESPONSE create_extension
 load_ipython_extension unload_ipython_extension prompt_from_lines transform_dots transform_prompt_mode
 astream_to_stdout CONFIG_PATH SYSP_PATH LOG_PATH""".split()
 
@@ -297,12 +295,13 @@ def _suppress_output_history(shell):
     finally: pub._is_publishing = old
 
 
-def _default_config(): return _default_config_for(DEFAULT_BACKEND)
+def _default_models():
+    return {name: dict(model=spec.default_model, completion_model=spec.default_completion_model, think=DEFAULT_THINK)
+            for name,spec in BACKENDS.items()}
 
 
-def _default_config_for(backend_name):
-    spec = backend_spec(backend_name)
-    return dict(model=os.environ.get("IPYAI_MODEL", spec.default_model), completion_model=spec.default_completion_model, think=DEFAULT_THINK,
+def _default_config():
+    return dict(backend=DEFAULT_BACKEND, models=_default_models(),
         code_theme=DEFAULT_CODE_THEME, log_exact=DEFAULT_LOG_EXACT, prompt_mode=DEFAULT_PROMPT_MODE)
 
 
@@ -312,22 +311,47 @@ def _ensure_config_dir(path=None):
     return path.parent
 
 
-def load_config(path=None, backend_name=DEFAULT_BACKEND):
+def _migrate_config(data):
+    "Migrate flat model/completion_model/think config to per-backend models format."
+    if "models" in data: return data
+    models = _default_models()
+    old_model = data.pop("model", None)
+    old_completion = data.pop("completion_model", None)
+    old_think = data.pop("think", None)
+    old_backend = data.get("backend", DEFAULT_BACKEND)
+    if old_model or old_completion or old_think:
+        bk = normalize_backend_name(old_backend)
+        if old_model: models[bk]["model"] = old_model
+        if old_completion: models[bk]["completion_model"] = old_completion
+        if old_think: models[bk]["think"] = old_think
+    data["models"] = models
+    return data
+
+
+def load_config(path=None, backend_name=None):
     path = Path(path or CONFIG_PATH)
     _ensure_config_dir(path)
-    cfg = _default_config_for(backend_name)
+    cfg = _default_config()
     if path.exists():
         data = json.loads(path.read_text())
         if not isinstance(data, dict): raise ValueError(f"Invalid config format in {path}")
-        cfg.update({k:v for k,v in data.items() if k in cfg})
+        data = _migrate_config(data)
+        if "models" in data:
+            for bk,vals in data["models"].items():
+                if bk in cfg["models"]: cfg["models"][bk].update(vals)
+        for k in ("backend", "code_theme", "log_exact", "prompt_mode"):
+            if k in data: cfg[k] = data[k]
     else: path.write_text(json.dumps(cfg, indent=2) + "\n")
+    backend_name = normalize_backend_name(backend_name or cfg["backend"])
     spec = backend_spec(backend_name)
-    cfg["model"] = str(cfg["model"]).strip() or spec.default_model
-    cfg["completion_model"] = str(cfg["completion_model"]).strip() or spec.default_completion_model
-    cfg["think"] = _validate_level("think", cfg["think"], DEFAULT_THINK)
+    mcfg = cfg["models"].get(backend_name, {})
+    cfg["model"] = str(mcfg.get("model", "") or os.environ.get("IPYAI_MODEL", "") or spec.default_model).strip()
+    cfg["completion_model"] = str(mcfg.get("completion_model", "") or spec.default_completion_model).strip()
+    cfg["think"] = _validate_level("think", mcfg.get("think"), DEFAULT_THINK)
     cfg["code_theme"] = str(cfg["code_theme"]).strip() or DEFAULT_CODE_THEME
     cfg["log_exact"] = _validate_bool("log_exact", cfg["log_exact"], DEFAULT_LOG_EXACT)
     cfg["prompt_mode"] = _validate_bool("prompt_mode", cfg["prompt_mode"], DEFAULT_PROMPT_MODE)
+    cfg["_backend_name"] = backend_name
     return cfg
 
 
@@ -517,10 +541,10 @@ class IPyAIExtension:
     def __init__(self, shell, model=None, completion_model=None, think=None, code_theme=None, log_exact=None, system_prompt=None,
         prompt_mode=None, backend_name=None, backend_factory=None):
         self.shell,self.loaded = shell,False
-        self.backend_name = normalize_backend_name(backend_name or os.environ.get("IPYAI_DEFAULT_BACKEND") or DEFAULT_BACKEND)
+        cfg = load_config(CONFIG_PATH, backend_name=backend_name)
+        self.backend_name = cfg["_backend_name"]
         self.backend_spec = backend_spec(self.backend_name)
         self.backend_factory = backend_factory or self.backend_spec.factory
-        cfg = load_config(CONFIG_PATH, backend_name=self.backend_name)
         self.prompt_mode = cfg["prompt_mode"] ^ bool(prompt_mode)
         self.model = model or cfg["model"] or self.backend_spec.default_model
         self.completion_model = completion_model or cfg["completion_model"] or self.backend_spec.default_completion_model
@@ -935,16 +959,17 @@ class IPyAIExtension:
 
 
 def _resume_command(session_id, backend_name):
-    entry = os.environ.get("IPYAI_ENTRYPOINT", "ipyai")
-    default = normalize_backend_name(os.environ.get("IPYAI_DEFAULT_BACKEND") or DEFAULT_BACKEND)
+    cfg = load_config(CONFIG_PATH)
+    default = cfg["_backend_name"]
     backend_part = f" -b {backend_name}" if backend_name != default else ""
-    return f"{entry}{backend_part} -r {session_id}"
+    return f"ipyai{backend_part} -r {session_id}"
 
 
 def create_extension(shell=None, resume=None, file=None, prompt_mode=False, backend=None, **kwargs):
     shell = shell or get_ipython()
     if shell is None: raise RuntimeError("No active IPython shell found")
-    backend_name = normalize_backend_name(backend or os.environ.get("IPYAI_DEFAULT_BACKEND") or DEFAULT_BACKEND)
+    cfg = load_config(CONFIG_PATH, backend_name=backend)
+    backend_name = cfg["_backend_name"]
     _ensure_ai_tables(shell.history_manager.db)
     if resume is not None:
         if resume == -1:
@@ -970,9 +995,9 @@ def create_extension(shell=None, resume=None, file=None, prompt_mode=False, back
 
 
 _ng_parser = argparse.ArgumentParser(add_help=False)
+_ng_parser.add_argument("-b", type=str, default=None)
 _ng_parser.add_argument("-r", type=int, nargs="?", const=-1, default=None)
 _ng_parser.add_argument("-l", type=str, default=None)
-_ng_parser.add_argument("-b", type=str, default=None)
 _ng_parser.add_argument("-p", action="store_true", default=False)
 
 

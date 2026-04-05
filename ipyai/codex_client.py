@@ -392,7 +392,7 @@ class CodexBackend:
                 if state is not None: state["session_id"] = session_id
                 return session_id
             except Exception: pass
-        thread_id = await client.start_thread(model=model, sp=self.system_prompt, tools=self._tools())
+        thread_id = await client.start_thread(model=model, sp=self.system_prompt, tools=self._tools(), ephemeral=True)
         if events:
             prompt = _notebook_xml(events) + "The XML above describes a notebook already loaded into the live IPython session. Treat it as prior "
             prompt += "session context for this thread. Reply with ok and nothing else."

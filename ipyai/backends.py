@@ -9,8 +9,8 @@ BACKEND_CLAUDE_API = "claude-api"
 BACKEND_CODEX = "codex"
 DEFAULT_BACKEND = BACKEND_CLAUDE_SDK
 BACKEND_ALIASES = {"claude": BACKEND_CLAUDE_SDK, "sdk": BACKEND_CLAUDE_SDK, "agent": BACKEND_CLAUDE_SDK,
-    "claude-sdk": BACKEND_CLAUDE_SDK, "api": BACKEND_CLAUDE_API, "ipyclaude": BACKEND_CLAUDE_API, "claude-api": BACKEND_CLAUDE_API,
-    "codex": BACKEND_CODEX, "ipycodex": BACKEND_CODEX}
+    "claude-sdk": BACKEND_CLAUDE_SDK, "api": BACKEND_CLAUDE_API, "claude-api": BACKEND_CLAUDE_API,
+    "codex": BACKEND_CODEX}
 
 
 @dataclass(frozen=True)

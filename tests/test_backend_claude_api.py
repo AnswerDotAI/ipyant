@@ -7,5 +7,7 @@ from tests.test_backends import _run_roundtrip
 
 
 def test_claude_api_backend_roundtrip(shell, tmp_path):
-    if not os.environ.get("ANTHROPIC_API_KEY"): pytest.skip("ANTHROPIC_API_KEY is not set")
+    key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_KEY")
+    if not key: pytest.skip("ANTHROPIC_API_KEY/ANTHROPIC_KEY not set")
+    os.environ["ANTHROPIC_API_KEY"] = key
     asyncio.run(_run_roundtrip(type(shell), tmp_path, BACKEND_CLAUDE_API))

@@ -37,10 +37,17 @@ The wrappers intentionally keep setup small:
 - [ipyai/tooling.py](ipyai/tooling.py): shared custom tool registry, schema generation, and local tool calling helpers
 - [ipyai/cli.py](ipyai/cli.py): `ipyai` console entry point
 - [tests/conftest.py](tests/conftest.py): minimal shell/history harness with repo-local config paths
-- [tests/test_backends.py](tests/test_backends.py): real end-to-end backend tests
+- [tests/test_backends.py](tests/test_backends.py): shared backend test helpers
+- [tests/test_backend_claude_sdk.py](tests/test_backend_claude_sdk.py): Claude SDK end-to-end test
+- [tests/test_backend_claude_api.py](tests/test_backend_claude_api.py): Claude API end-to-end test
+- [tests/test_backend_codex.py](tests/test_backend_codex.py): Codex end-to-end test
 - [tests/test_core.py](tests/test_core.py): small local guardrail tests for transforms and backend session filtering
 - [samples/capture_sdk_shapes.py](samples/capture_sdk_shapes.py): real Claude SDK capture script
 - [samples/outputs/](samples/outputs/): committed normalized SDK payload captures
+
+## CLI Flag Plumbing
+
+`ipyai` uses `ipythonng.cli.parse_flags()` to split CLI args into ipyai flags and IPython args. `parse_flags` scans `sys.argv[1:]` for short flags (e.g. `-b`, `-r`, `-l`) that are not IPython's own short flags, collects them and their values into `IPYTHONNG_FLAGS` env var, and passes the rest through to IPython. When the ipyai extension loads, `_parse_ng_flags()` in `core.py` reads `IPYTHONNG_FLAGS` and parses it with argparse. This two-stage approach lets ipyai flags coexist with IPython flags on the same command line (e.g. `ipyai -b codex -r 5 --pdb`).
 
 ## Current Architecture
 
