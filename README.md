@@ -1,6 +1,6 @@
 # ipyant
 
-`ipyant` is a terminal IPython extension that turns input starting with `.` into a Claude-backed prompt.
+`ipyant` is a terminal IPython extension that supports Claude-backed prompt using the Agent SDK, so it supports Claude Code subscriptions as well as API keys.
 
 It is aimed at terminal IPython, not notebook frontends.
 
@@ -10,8 +10,31 @@ It is aimed at terminal IPython, not notebook frontends.
 pip install -e ipyant
 ```
 
-`ipyant` uses the local Claude Code / Claude Agent SDK stack, so Claude must already be installed and authenticated on the machine.
-It also depends on `safepyrun` for the live `python` tool.
+`ipyant` uses the local Claude Code / Claude Agent SDK stack, so Claude must already be installed and authenticated on the machine. It also depends on `safepyrun` for the live `python` tool.
+
+## How to Use Prompts
+
+There are several ways to send a prompt to Claude from ipyant:
+
+**Dot prefix (`.`)** — In normal IPython mode, start any line with `.` to send it as a prompt. Everything after the dot is sent to Claude. Continuation lines (without a dot) are included too, so you can write multi-line prompts:
+
+```python
+.explain what this dataframe transform is doing
+```
+
+```python
+.draft a plan for this notebook:
+focus on state management
+and failure cases
+```
+
+**Prompt mode** — When prompt mode is on, *every* line you type is sent to Claude by default. To run normal Python code instead, prefix the line with `;`. Shell commands (`!`) and magics (`%`) still work as usual. There are three ways to enable prompt mode:
+
+- **`opt-p`** (Alt-p) — toggle prompt mode on/off at any time from the terminal
+- **`-p` flag** — start ipyant in prompt mode: `ipyant -p`
+- **`prompt_mode` config** — set `"prompt_mode": true` in `config.json` to always start in prompt mode
+
+You can also toggle prompt mode during a session with `%ipyant prompt`.
 
 ## CLI
 
@@ -19,11 +42,13 @@ It also depends on `safepyrun` for the live `python` tool.
 ipyant
 ```
 
-Resume a previous session:
+Flags:
 
 ```bash
-ipyant -r
-ipyant -r 43
+ipyant -r        # resume last session
+ipyant -r 43     # resume session 43
+ipyant -l file   # load a saved notebook session
+ipyant -p        # start in prompt mode
 ```
 
 On exit, `ipyant` prints the session ID so you can resume later.
@@ -34,29 +59,9 @@ On exit, `ipyant` prints the session ID so you can resume later.
 %load_ext ipyant
 ```
 
-Reload after local edits:
-
-```python
-%reload_ext ipyant
-```
-
 ## Usage
 
-Single-line prompt:
-
-```python
-.explain what this dataframe transform is doing
-```
-
-Multiline prompt:
-
-```python
-.draft a plan for this notebook:
-focus on state management
-and failure cases
-```
-
-`ipyant` also provides `%ipyant` / `%%ipyant`.
+`ipyant` is a normal IPython session — you can run Python code exactly as you would in plain IPython. On top of that, you can send prompts to Claude as described above. `%ipyant` / `%%ipyant` magics are also available.
 
 Useful commands:
 
@@ -73,8 +78,6 @@ Useful commands:
 %ipyant sessions
 %ipyant reset
 ```
-
-`%ipyant prompt` toggles prompt mode. `opt-p` toggles the same mode from the terminal keybinding layer.
 
 ## Context Model
 
