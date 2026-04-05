@@ -1,4 +1,4 @@
-import contextlib, io, json, os, re, sys, traceback, uuid
+import json, os, re, uuid
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -136,32 +136,22 @@ class ClaudeBackend:
 
     def _sdk_server(self):
         if self._python_server is not None: return self._python_server
-        shell = self.shell
+        ns = self.shell.user_ns
+
+        async def _call_ns_tool(name, *args, **kwargs):
+            fn = ns.get(name)
+            if not callable(fn): raise NameError(f"{name!r} is not defined in the active IPython namespace")
+            return await fn(*args, **kwargs)
 
         @tool("python", "Execute Python in the active IPython namespace", {"code": str})
         async def python_tool(args):
             code = args["code"]
-            stdout,stderr = io.StringIO(),io.StringIO()
             try:
-                try: transformed = shell.transform_cell(code)
-                except Exception: transformed,preprocessing_exc = code,sys.exc_info()
-                else: preprocessing_exc = None
-                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                    result = await shell.run_cell_async(code, store_history=False, transformed_cell=transformed, preprocessing_exc_tuple=preprocessing_exc)
-                err = getattr(result, "error_in_exec", None) or getattr(result, "error_before_exec", None)
-                parts = []
-                if stdout.getvalue(): parts.append(f"stdout:\n{stdout.getvalue().rstrip()}")
-                if stderr.getvalue(): parts.append(f"stderr:\n{stderr.getvalue().rstrip()}")
-                if err is not None:
-                    parts.append("traceback:\n" + "".join(traceback.format_exception(type(err), err, err.__traceback__)).rstrip())
-                    return dict(content=[dict(type="text", text="\n\n".join(o for o in parts if o))], is_error=True)
-                value = getattr(result, "result", None)
-                if value is not None: parts.append(f"result:\n{value!r}")
-                if not parts: parts.append("ok")
-                return dict(content=[dict(type="text", text="\n\n".join(parts))])
-            except Exception as e:
-                tb = "".join(traceback.format_exception(type(e), e, e.__traceback__)).rstrip()
-                return dict(content=[dict(type="text", text=tb)], is_error=True)
+                try: result = await _call_ns_tool("pyrun", code=code)
+                except TypeError: result = await _call_ns_tool("pyrun", code)
+                text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+                return dict(content=[dict(type="text", text=text)])
+            except Exception as e: return dict(content=[dict(type="text", text=f"Error: {e}")], is_error=True)
 
         self._python_server = create_sdk_mcp_server(name="ipyant", tools=[python_tool])
         return self._python_server

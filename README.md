@@ -11,6 +11,7 @@ pip install -e ipyant
 ```
 
 `ipyant` uses the local Claude Code / Claude Agent SDK stack, so Claude must already be installed and authenticated on the machine.
+It also depends on `safepyrun` for the live `python` tool.
 
 ## CLI
 
@@ -92,7 +93,7 @@ Prompts are stored in SQLite in a dedicated `claude_prompts` table. Claude-nativ
 
 `ipyant` exposes exactly one custom tool:
 
-- `python`: executes code in the live IPython namespace
+- `python`: delegates to `pyrun` in the live IPython namespace
 
 It also enables these built-in Claude Code tools:
 
@@ -104,11 +105,11 @@ It also enables these built-in Claude Code tools:
 - `WebSearch`
 - `Write`
 
-There is no dynamic `%ipyant tool ...` mechanism.
+The `ipyant` CLI loads `safepyrun` before `ipyant`, so `pyrun` is available by default in normal terminal use.
 
 ## Skills
 
-Skills are Claude-native now. `ipyant` enables the built-in `Skill` tool and loads normal Claude user/project skills through the Agent SDK. The old custom `load_skill` implementation is gone.
+Skills are Claude-native. `ipyant` enables the built-in `Skill` tool and loads normal Claude user/project skills through the Agent SDK.
 
 ## Notebook Save/Load
 

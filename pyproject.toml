@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [{name = "Jeremy Howard", email = "info@answer.ai"}]
-dependencies = ["fastcore>=1.12.31", "ipython>=9", "rich", "mistletoe", "ipythonng", "claude-agent-sdk"]
+dependencies = ["fastcore>=1.12.31", "ipython>=9", "rich", "mistletoe", "ipythonng", "claude-agent-sdk", "safepyrun"]
 
 [project.scripts]
 ipyant = "ipyant.cli:main"

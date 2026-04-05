@@ -1,7 +1,5 @@
 # DEV
 
-`ipyant` is now a Claude Agent SDK-backed rewrite of the old `ipycodex` idea. The Codex app-server implementation has been removed.
-
 ## Setup
 
 Editable install:
@@ -78,17 +76,17 @@ The custom tool story is intentionally small:
 - one in-process MCP tool: `python`
 - built-ins: `Bash`, `Edit`, `Read`, `Skill`, `WebFetch`, `WebSearch`, `Write`
 
-No dynamic `%ipyant tool ...` path remains.
+`python` does not call back into `InteractiveShell.run_cell*`. It delegates to `pyrun` from `safepyrun`, looked up in `shell.user_ns`, matching the old `ipycodex` direct-call boundary and avoiding nested IPython cell execution.
+
+The `ipyant` CLI loads `safepyrun` before `ipyant`, so normal terminal sessions get `pyrun` automatically.
 
 ### Skills
 
-Skills are Claude-native now:
+Skills are Claude-native:
 
 - built-in `Skill` tool is enabled
 - SDK `setting_sources=["user", "project"]`
 - optional plugin directories are discovered from `.claude/plugins` up the cwd parent chain
-
-The old custom `.agents/skills/` parser, `load_skill`, and eval-block mechanism are gone.
 
 ## Samples
 

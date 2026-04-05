@@ -1,6 +1,7 @@
 from claude_agent_sdk import get_session_messages
 from IPython.core.interactiveshell import InteractiveShell
 from mcp.types import CallToolRequest, CallToolRequestParams
+from safepyrun import RunPython
 
 from ipyant.claude_client import AsyncStreamFormatter, ClaudeBackend, write_synthetic_session
 
@@ -30,10 +31,11 @@ def test_write_synthetic_session_roundtrips_through_sdk(tmp_path):
     assert msgs[1].message["content"][0]["text"] == "60"
 
 
-async def test_python_tool_executes_against_real_ipython_shell():
+async def test_python_tool_delegates_to_real_pyrun():
     InteractiveShell.clear_instance()
     try:
         shell = InteractiveShell.instance()
+        shell.user_ns["pyrun"] = RunPython(g=shell.user_ns)
         backend = ClaudeBackend(shell=shell)
         server = backend._sdk_server()["instance"]
         handler = server.request_handlers[CallToolRequest]
@@ -42,6 +44,6 @@ async def test_python_tool_executes_against_real_ipython_shell():
         result = await handler(CallToolRequest(method="tools/call", params=CallToolRequestParams(name="python", arguments={"code": "x + 1"})))
 
         assert result.root.isError is False
-        assert result.root.content[0].text.endswith("result:\n2")
+        assert result.root.content[0].text == "2"
         assert shell.user_ns["x"] == 1
     finally: InteractiveShell.clear_instance()
