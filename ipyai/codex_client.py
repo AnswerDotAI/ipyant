@@ -184,7 +184,7 @@ class _CodexAppServer:
     async def _start(self):
         if self.proc and self.proc.returncode is None: return
         self.proc = await asyncio.create_subprocess_exec(*_codex_cmd(), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE)
+            stderr=asyncio.subprocess.PIPE, start_new_session=True)
         self.pending = {}
         self.events = asyncio.Queue()
         self.read_task = asyncio.create_task(self._read_stdout())
@@ -239,6 +239,7 @@ class _CodexAppServer:
     async def ensure_initialized(self):
         async with self.init_lock:
             if self.initialized and self.proc and self.proc.returncode is None: return
+            self.initialized = False
             await self._start()
             await self.request("initialize", dict(clientInfo=dict(name="ipyai", title="ipyai", version=_pkg_version()),
                 capabilities=dict(experimentalApi=True)))
@@ -269,7 +270,14 @@ class _CodexAppServer:
             if output_schema is not None: params["outputSchema"] = output_schema
             turn = await self.request("turn/start", params)
             turn_id = turn["turn"]["id"]
-            async for chunk in self._consume_turn(thread_id, turn_id, ns or {}): yield chunk
+            consumer = self._consume_turn(thread_id, turn_id, ns or {})
+            try:
+                async for chunk in consumer: yield chunk
+            except (asyncio.CancelledError, GeneratorExit):
+                await consumer.aclose()
+                try: await self.notify("turn/cancel", dict(threadId=thread_id, turnId=turn_id))
+                except Exception: pass
+                raise
 
     async def _consume_turn(self, thread_id, turn_id, ns):
         agent_seen,cmd_output,cmd_items = set(),defaultdict(str),{}
@@ -396,10 +404,9 @@ class CodexBackend:
         if events:
             prompt = _notebook_xml(events) + "The XML above describes a notebook already loaded into the live IPython session. Treat it as prior "
             prompt += "session context for this thread. Reply with ok and nothing else."
-            async for _ in client.turn_stream(thread_id, prompt, ns=self.ns, think="l"): pass
+            async for _ in client.turn_stream(thread_id, prompt, ns=self.ns, think=think): pass
         if state is not None: state["session_id"] = thread_id
         return thread_id
 
     async def stream_turn(self, prompt, *, model, think="l", session_id=None, records=None, events=None, state=None):
-        thread_id = await self.bootstrap_session(model=model, think=think, session_id=session_id, records=records, events=events, state=state)
-        async for chunk in get_codex_client().turn_stream(thread_id, prompt, ns=self.ns, think=think): yield chunk
+        async for chunk in get_codex_client().turn_stream(session_id, prompt, ns=self.ns, think=think): yield chunk

@@ -228,20 +228,22 @@ async def _astream_to_live_markdown(chunks, out, code_theme, formatter=None, par
     console = console_cls(file=out, force_terminal=True)
     text = ""
     live = live_cm = None
-    async for chunk in chunks:
-        if chunk:
-            text += chunk
-            if partial is not None: partial.append(chunk)
-        display_text = getattr(formatter, "display_text", None) if formatter is not None else None
-        current = text if display_text is None else display_text
-        if not current: continue
-        renderable = _markdown_renderable(_display_text(current), code_theme, markdown_cls)
-        if live is None:
-            live_cm = live_cls(renderable, console=console, auto_refresh=False, transient=False, redirect_stdout=True, redirect_stderr=False,
-                vertical_overflow="visible")
-            live = live_cm.__enter__()
-        else: live.update(renderable, refresh=True)
-    if live_cm is not None: live_cm.__exit__(None, None, None)
+    try:
+        async for chunk in chunks:
+            if chunk:
+                text += chunk
+                if partial is not None: partial.append(chunk)
+            display_text = getattr(formatter, "display_text", None) if formatter is not None else None
+            current = text if display_text is None else display_text
+            if not current: continue
+            renderable = _markdown_renderable(_display_text(current), code_theme, markdown_cls)
+            if live is None:
+                live_cm = live_cls(renderable, console=console, auto_refresh=False, transient=False, redirect_stdout=True, redirect_stderr=False,
+                    vertical_overflow="visible")
+                live = live_cm.__enter__()
+            else: live.update(renderable, refresh=True)
+    finally:
+        if live_cm is not None: live_cm.__exit__(None, None, None)
     return getattr(formatter, "final_text", text)
 
 
@@ -948,7 +950,9 @@ class IPyAIExtension:
         except asyncio.CancelledError:
             text = "".join(partial) + "\n<system>user interrupted</system>"
             print("\nstopped")
-        finally: loop.remove_signal_handler(signal.SIGINT)
+        finally:
+            loop.remove_signal_handler(signal.SIGINT)
+            await stream.aclose()
         self.shell.user_ns[LAST_RESPONSE] = text
         ng = getattr(self.shell, "_ipythonng_extension", None)
         if ng: ng._pty_output = _thinking_to_blockquote(text)
