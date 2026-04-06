@@ -14,6 +14,7 @@ from .tooling import available_tool_names, sdk_mcp_tools
 BUILTIN_TOOLS = ["Bash", "Edit", "Read", "Skill", "WebFetch", "WebSearch", "Write"]
 _THINK_MAP = dict(l="low", m="medium", h="high")
 _THINK_RE = re.compile(r"<thinking>\n.*?\n</thinking>\n*", flags=re.DOTALL)
+_TOOL_PREFIX_RE = re.compile(r"^mcp__\w+__")
 
 
 def _blockquote(text): return "".join(f"> {line}\n" if line.strip() else ">\n" for line in text.splitlines()) if text else ""
@@ -38,12 +39,20 @@ def _stringify_content(content):
     return "\n".join(o for o in parts if o)
 
 
+def _tool_name(name): return _TOOL_PREFIX_RE.sub("", name or "")
+
+
+def _tool_call(name, args):
+    name = _tool_name(name)
+    return f"{name}()" if not args else f"{name}({', '.join(f'{k}={v!r}' for k,v in sorted(args.items()))})"
+
+
 def _compact_tool(name, args, result, is_error=False):
-    call = f"{name}()" if not args else f"{name}({', '.join(f'{k}={v!r}' for k,v in sorted(args.items()))})"
+    call = _tool_call(name, args)
     res = (result or "").strip().replace("\n", " ")
     if len(res) > 100: res = res[:97] + "..."
     status = " [error]" if is_error else ""
-    return f"\n\n🔧 {call}{status} => {res}\n" if res else f"\n\n🔧 {call}{status}\n"
+    return f"\n\n🔧 {call}{status} => {res}\n\n" if res else f"\n\n🔧 {call}{status}\n\n"
 
 
 class AsyncStreamFormatter:
@@ -85,8 +94,7 @@ class AsyncStreamFormatter:
             self._append_final(stored)
             return "" if self.is_tty else stored
         if kind == "tool_start":
-            name,args = event.get("name") or "tool", event.get("input") or {}
-            self._tool_text = f"⌛ `{name}`{'' if not args else f' {json.dumps(args, ensure_ascii=False, default=str)}'}"
+            self._tool_text = f"⌛ `{_tool_call(event.get('name') or 'tool', event.get('input') or {})}`"
             self._update_display()
             return ""
         if kind == "tool_complete":

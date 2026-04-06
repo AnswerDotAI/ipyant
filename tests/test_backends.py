@@ -1,8 +1,8 @@
-import asyncio, json, os, re
+import json, re
 
 from safepyrun import RunPython
 
-from ipyai.backends import BACKEND_CLAUDE_API, BACKEND_CLAUDE_SDK, BACKEND_CODEX
+from ipyai.backends import BACKEND_CLAUDE_API, BACKEND_CLAUDE_SDK
 from ipyai.core import IPyAIExtension, LAST_RESPONSE
 
 
@@ -46,5 +46,4 @@ async def _run_once(shell_cls, tmp_path, backend_name, model):
 async def _run_roundtrip(shell_cls, tmp_path, backend_name):
     model = _backend_model(backend_name)
     await _run_once(shell_cls, tmp_path, backend_name, model)
-
 

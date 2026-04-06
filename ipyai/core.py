@@ -299,7 +299,7 @@ def _suppress_output_history(shell):
 
 def _default_models():
     return {name: dict(model=spec.default_model, completion_model=spec.default_completion_model, think=DEFAULT_THINK)
-            for name,spec in BACKENDS.items()}
+        for name,spec in BACKENDS.items()}
 
 
 def _default_config():

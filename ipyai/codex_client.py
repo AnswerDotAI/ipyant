@@ -1,4 +1,4 @@
-import asyncio, ast, html, json, os, shlex
+import asyncio, ast, html, json, os, re, shlex
 from collections import defaultdict
 from importlib.metadata import version
 
@@ -6,6 +6,7 @@ from .tooling import call_ns_tool, openai_tool_schemas
 
 _HIST_SP = ("\n\nIf the current user input contains an <ipython-notebook> block, treat it as serialized prior notebook state. "
     "Respect all code, notes, and earlier prompt/response pairs contained inside it.")
+_TOOL_PREFIX_RE = re.compile(r"^mcp__\w+__")
 
 
 def _blockquote(text): return "".join(f"> {line}\n" if line.strip() else ">\n" for line in text.splitlines()) if text else ""
@@ -47,18 +48,26 @@ def _dynamic_tools(tools):
 def _effort_level(level): return dict(l="low", m="medium", h="high").get(level, level or None)
 
 
+def _tool_name(name): return _TOOL_PREFIX_RE.sub("", name or "")
+
+
+def _tool_call(name, args):
+    name = _tool_name(name)
+    return f"{name}()" if not args else f"{name}({', '.join(f'{k}={v!r}' for k,v in sorted(args.items()))})"
+
+
 def _compact_tool(name, args, result):
-    call = f"{name}()" if not args else f"{name}({', '.join(f'{k}={v!r}' for k,v in sorted(args.items()))})"
+    call = _tool_call(name, args)
     res = (result or "").strip().replace("\n", " ")
     if len(res) > 80: res = res[:77] + "..."
-    return f"\n\n🔧 {call} => {res}\n" if res else f"\n\n🔧 {call}\n"
+    return f"\n\n🔧 {call} => {res}\n\n" if res else f"\n\n🔧 {call}\n\n"
 
 
 def _compact_cmd(command, output, exit_code):
     res = (output or "").strip().replace("\n", " ")
     if len(res) > 80: res = res[:77] + "..."
     status = "" if exit_code in (None, 0) else f" [exit {exit_code}]"
-    return f"\n\n🔧 {command}{status} => {res}\n" if res else f"\n\n🔧 {command}{status}\n"
+    return f"\n\n🔧 {command}{status} => {res}\n\n" if res else f"\n\n🔧 {command}{status}\n\n"
 
 
 def _content_items_text(items):
@@ -103,12 +112,14 @@ class AsyncStreamFormatter:
         self.final_text = ""
         self.display_text = ""
         self._live_commands = {}
+        self._tool_text = ""
         self._thinking_text = ""
 
     def _update_display(self):
         parts = []
         if self._thinking_text: parts.append(_blockquote(self._thinking_text))
         if self.final_text: parts.append(self.final_text)
+        if self._tool_text: parts.append(self._tool_text)
         live = "\n\n".join(self._live_command_text(o) for o in self._live_commands.values())
         if live: parts.append(live)
         self.display_text = "\n\n".join(o.rstrip() for o in parts if o).rstrip()
@@ -142,6 +153,15 @@ class AsyncStreamFormatter:
             self._thinking_text = ""
             self._append_final(stored)
             return "" if self.is_tty else stored
+        if kind == "tool_start":
+            self._tool_text = f"⌛ `{_tool_call(event.get('name') or 'tool', event.get('input') or {})}`"
+            self._update_display()
+            return ""
+        if kind == "tool_complete":
+            self._tool_text = ""
+            text = _compact_tool(event.get("name") or "tool", event.get("input") or {}, event.get("content") or "")
+            self._append_final(text)
+            return "" if self.is_tty else text
         if kind == "command_start":
             self._live_commands[event.get("id")] = dict(command=event.get("command"), cwd=event.get("cwd"), output="")
             self._update_display()
@@ -297,6 +317,8 @@ class _CodexAppServer:
                 if item.get("type") == "reasoning" and not thinking:
                     thinking = True
                     yield dict(kind="thinking_start")
+                elif item.get("type") == "dynamicToolCall":
+                    yield dict(kind="tool_start", name=item.get("tool"), input=item.get("arguments") or {})
                 elif item.get("type") == "commandExecution":
                     cmd_items[item.get("id")] = dict(command=item.get("command"), cwd=item.get("cwd"))
                     yield dict(kind="command_start", id=item.get("id"), command=item.get("command"), cwd=item.get("cwd"))
@@ -323,6 +345,11 @@ class _CodexAppServer:
                 if item.get("type") == "reasoning" and thinking:
                     yield dict(kind="thinking_end")
                     thinking = False
+                    continue
+                if item.get("type") == "dynamicToolCall":
+                    saw_text = True
+                    yield dict(kind="tool_complete", name=item.get("tool"), input=item.get("arguments") or {},
+                        content=_content_items_text(item.get("contentItems")))
                     continue
                 if (text := self._completed_item_text(item, agent_seen, cmd_output)):
                     if item.get("type") != "agentMessage" and saw_text and not text.startswith("\n"): text = "\n" + text
