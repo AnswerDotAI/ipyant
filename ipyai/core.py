@@ -14,8 +14,8 @@ from rich.file_proxy import FileProxy
 from rich.live import Live
 from rich.markdown import Markdown, TableDataElement
 
+from .backend_common import CommonStreamFormatter, ConversationSeed, PromptTurn, StartupEvent, thinking_to_blockquote
 from .backends import BACKENDS, DEFAULT_BACKEND, backend_spec, normalize_backend_name
-from .claude_client import AsyncStreamFormatter as ClaudeAsyncStreamFormatter
 
 
 FileProxy.isatty = lambda self: self.rich_proxied_file.isatty()
@@ -210,14 +210,7 @@ def _run_shell_refs(cmds):
 def _event_sort_key(o): return o.get("line", 0), 0 if o.get("kind") == "code" else 1
 
 
-def _thinking_to_blockquote(text):
-    def _bq(m):
-        from .claude_client import _blockquote
-        return _blockquote(m.group(1).strip()) + "\n"
-    return re.sub(r"<thinking>\n(.*?)\n</thinking>\n*", _bq, text, flags=re.DOTALL)
-
-
-def _display_text(text): return _thinking_to_blockquote(text)
+def _display_text(text): return thinking_to_blockquote(text)
 
 
 def _markdown_renderable(text, code_theme, markdown_cls=Markdown):
@@ -247,7 +240,7 @@ async def _astream_to_live_markdown(chunks, out, code_theme, formatter=None, par
     return getattr(formatter, "final_text", text)
 
 
-async def astream_to_stdout(stream, formatter_cls: Callable[..., ClaudeAsyncStreamFormatter]=ClaudeAsyncStreamFormatter, out=None,
+async def astream_to_stdout(stream, formatter_cls: Callable[..., CommonStreamFormatter]=CommonStreamFormatter, out=None,
     code_theme=DEFAULT_CODE_THEME, partial=None, console_cls=Console, markdown_cls=Markdown, live_cls=Live):
     out = sys.stdout if out is None else out
     fmt = formatter_cls()
@@ -643,6 +636,14 @@ class IPyAIExtension:
             events.append(dict(kind="prompt", id=pid, line=history_line+1, history_line=history_line, prompt=prompt, full_prompt=full_prompt, response=response))
         return sorted(events, key=_event_sort_key)
 
+    def conversation_seed(self, prompt_records=None, startup_events=None):
+        prompt_records = self.prompt_records() if prompt_records is None else prompt_records
+        startup_events = self.startup_events() if startup_events is None else startup_events
+        turns = tuple(PromptTurn(prompt=prompt, full_prompt=full_prompt, response=response, history_line=history_line)
+            for _,prompt,full_prompt,response,history_line in prompt_records)
+        events = tuple(StartupEvent(**{k:v for k,v in o.items() if k != "id"}) for o in startup_events)
+        return ConversationSeed(turns=turns, startup_events=events)
+
     def save_notebook(self, path):
         path = Path(path)
         if path.suffix != ".ipynb": path = path.with_suffix(".ipynb")
@@ -935,13 +936,11 @@ class IPyAIExtension:
         warnings = _tag("warnings", f"The following symbols were referenced but aren't defined in the interpreter: {', '.join(missing_vars)}") + "\n" if missing_vars else ""
         full_prompt = warnings + var_xml + shell_xml + self.format_prompt(prompt, self.last_prompt_line()+1, history_line+1)
         self.shell.user_ns[LAST_PROMPT] = prompt
-        events = self.startup_events()
         backend = self.make_backend()
-        state,partial = {},[]
-        provider_session = await backend.bootstrap_session(model=self.model, think=self.think, session_id=self.get_provider_session_id(),
-            records=prompt_records, events=events, state=state)
-        stream = backend.stream_turn(full_prompt, model=self.model, think=self.think, session_id=provider_session, records=prompt_records, events=events,
-            state=state)
+        partial = []
+        turn = await backend.prepare_turn(prompt=full_prompt, model=self.model, think=self.think,
+            provider_session_id=self.get_provider_session_id(), seed=self.conversation_seed(prompt_records=prompt_records))
+        stream = turn.stream
         loop,task = asyncio.get_running_loop(),asyncio.current_task()
         loop.add_signal_handler(signal.SIGINT, task.cancel)
         try:
@@ -955,8 +954,8 @@ class IPyAIExtension:
             await stream.aclose()
         self.shell.user_ns[LAST_RESPONSE] = text
         ng = getattr(self.shell, "_ipythonng_extension", None)
-        if ng: ng._pty_output = _thinking_to_blockquote(text)
-        if state.get("session_id"): self.set_provider_session(state["session_id"])
+        if ng: ng._pty_output = thinking_to_blockquote(text)
+        if session_id := await turn.wait_provider_session_id(): self.set_provider_session(session_id)
         self.log_exact_exchange(full_prompt, text)
         self.save_prompt(prompt, full_prompt, text, history_line)
         return None

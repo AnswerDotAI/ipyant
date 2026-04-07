@@ -9,15 +9,45 @@ CUSTOM_TOOL_NAMES = ("pyrun", "bash", "start_bgterm", "write_stdin", "close_bgte
 def _result_text(res): return res if isinstance(res, str) else json.dumps(res, ensure_ascii=False, default=str)
 
 
-def available_tool_names(ns): return [o for o in CUSTOM_TOOL_NAMES if callable(ns.get(o))]
+class ToolRegistry:
+    def __init__(self, ns): self.ns = ns
+
+    def names(self): return [o for o in CUSTOM_TOOL_NAMES if callable(self.ns.get(o))]
+
+    def openai_schemas(self):
+        res = []
+        for name in self.names():
+            try: res.append(dict(type="function", function=get_schema_nm(name, self.ns, pname="parameters")))
+            except Exception: continue
+        return res
+
+    def codex_dynamic_tools(self):
+        return [dict(name=o["function"]["name"], description=o["function"].get("description") or "",
+            inputSchema=o["function"].get("parameters") or dict(type="object")) for o in self.openai_schemas()]
+
+    def claude_allowed_tool_names(self, prefix="mcp__ipy__"): return [f"{prefix}{o}" for o in self.names()]
+
+    async def call_text(self, name, args=None): return await call_ns_tool(self.ns, name, args)
+
+    def claude_sdk_tools(self, sdk_tool):
+        res = []
+        for name in self.names():
+            try: schema = get_schema_nm(name, self.ns)
+            except Exception: continue
+
+            @sdk_tool(schema["name"], schema["description"], schema["input_schema"])
+            async def _tool(args, _name=name):
+                try: return dict(content=[dict(type="text", text=await self.call_text(_name, args))])
+                except Exception as e: return dict(content=[dict(type="text", text=f"Error: {e}")], is_error=True)
+
+            res.append(_tool)
+        return res
 
 
-def openai_tool_schemas(ns):
-    res = []
-    for name in available_tool_names(ns):
-        try: res.append(dict(type="function", function=get_schema_nm(name, ns, pname="parameters")))
-        except Exception: continue
-    return res
+def available_tool_names(ns): return ToolRegistry(ns).names()
+
+
+def openai_tool_schemas(ns): return ToolRegistry(ns).openai_schemas()
 
 
 async def call_ns_tool(ns, name, args=None):
@@ -28,16 +58,4 @@ async def call_ns_tool(ns, name, args=None):
     return _result_text(res)
 
 
-def sdk_mcp_tools(ns, sdk_tool):
-    res = []
-    for name in available_tool_names(ns):
-        try: schema = get_schema_nm(name, ns)
-        except Exception: continue
-
-        @sdk_tool(schema["name"], schema["description"], schema["input_schema"])
-        async def _tool(args, _name=name):
-            try: return dict(content=[dict(type="text", text=await call_ns_tool(ns, _name, args))])
-            except Exception as e: return dict(content=[dict(type="text", text=f"Error: {e}")], is_error=True)
-
-        res.append(_tool)
-    return res
+def sdk_mcp_tools(ns, sdk_tool): return ToolRegistry(ns).claude_sdk_tools(sdk_tool)

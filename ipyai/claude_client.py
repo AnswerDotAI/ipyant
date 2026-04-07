@@ -1,32 +1,20 @@
-import json, os, re, uuid
+import json, uuid
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
-from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ResultMessage, StreamEvent, TextBlock
+from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ResultMessage, StreamEvent
 from claude_agent_sdk import ToolResultBlock, ToolUseBlock, UserMessage, create_sdk_mcp_server, tool
 from claude_agent_sdk._internal.sessions import _get_project_dir
 
-from .tooling import available_tool_names, sdk_mcp_tools
+from .backend_common import (BaseBackend, CommonStreamFormatter, ConversationSeed, compact_tool, effort_level,
+    replayable_assistant_text, strip_thinking, tool_call, tool_name)
 
 
 BUILTIN_TOOLS = ["Bash", "Edit", "Read", "Skill", "WebFetch", "WebSearch", "Write"]
-_THINK_MAP = dict(l="low", m="medium", h="high")
-_THINK_RE = re.compile(r"<thinking>\n.*?\n</thinking>\n*", flags=re.DOTALL)
-_TOOL_PREFIX_RE = re.compile(r"^mcp__\w+__")
-
-
-def _blockquote(text): return "".join(f"> {line}\n" if line.strip() else ">\n" for line in text.splitlines()) if text else ""
-
-
-def _effort(level): return _THINK_MAP.get(level, level or None)
 
 
 def _iso(ts): return ts.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _strip_thinking(text): return _THINK_RE.sub("", text or "").strip()
 
 
 def _stringify_content(content):
@@ -39,78 +27,8 @@ def _stringify_content(content):
     return "\n".join(o for o in parts if o)
 
 
-def _tool_name(name): return _TOOL_PREFIX_RE.sub("", name or "")
-
-
-def _tool_call(name, args):
-    name = _tool_name(name)
-    return f"{name}()" if not args else f"{name}({', '.join(f'{k}={v!r}' for k,v in sorted(args.items()))})"
-
-
-def _compact_tool(name, args, result, is_error=False):
-    call = _tool_call(name, args)
-    res = (result or "").strip().replace("\n", " ")
-    if len(res) > 100: res = res[:97] + "..."
-    status = " [error]" if is_error else ""
-    return f"\n\n🔧 {call}{status} => {res}\n\n" if res else f"\n\n🔧 {call}{status}\n\n"
-
-
-class AsyncStreamFormatter:
-    def __init__(self):
-        self.is_tty = False
-        self.final_text = ""
-        self.display_text = ""
-        self._thinking_text = ""
-        self._tool_text = ""
-
-    def _update_display(self):
-        parts = []
-        if self._thinking_text: parts.append(_blockquote(self._thinking_text).rstrip())
-        if self.final_text: parts.append(self.final_text.rstrip())
-        if self._tool_text: parts.append(self._tool_text.rstrip())
-        self.display_text = "\n\n".join(o for o in parts if o)
-
-    def _append_final(self, text):
-        if text: self.final_text += text
-        self._update_display()
-
-    def _format_event(self, event):
-        if isinstance(event, str):
-            self._append_final(event)
-            return event
-        if not isinstance(event, dict): return ""
-        kind = event.get("kind")
-        if kind == "thinking_start":
-            self._thinking_text = ""
-            self._update_display()
-            return ""
-        if kind == "thinking_delta":
-            self._thinking_text += event.get("delta", "")
-            self._update_display()
-            return ""
-        if kind == "thinking_end":
-            stored = f"<thinking>\n{self._thinking_text}\n</thinking>\n\n" if self._thinking_text else ""
-            self._thinking_text = ""
-            self._append_final(stored)
-            return "" if self.is_tty else stored
-        if kind == "tool_start":
-            self._tool_text = f"⌛ `{_tool_call(event.get('name') or 'tool', event.get('input') or {})}`"
-            self._update_display()
-            return ""
-        if kind == "tool_complete":
-            self._tool_text = ""
-            text = _compact_tool(event.get("name") or "tool", event.get("input") or {}, event.get("content") or "", event.get("is_error"))
-            self._append_final(text)
-            return "" if self.is_tty else text
-        return ""
-
-    async def format_stream(self, stream):
-        async for o in stream: yield self._format_event(o)
-
-
-class FullResponse(str):
-    @property
-    def content(self): return str(self)
+AsyncStreamFormatter = CommonStreamFormatter
+_tool_name,_tool_call,_compact_tool = tool_name,tool_call,compact_tool
 
 
 def write_synthetic_session(project_root: str | Path, turns: Iterable, session_id: str | None=None):
@@ -128,111 +46,96 @@ def write_synthetic_session(project_root: str | Path, turns: Iterable, session_i
         lines.append(dict(type="user", uuid=user_uuid, parentUuid=parent_uuid, sessionId=session_id, timestamp=_iso(now + timedelta(seconds=i * 2)),
             cwd=str(project_root) if parent_uuid is None else None, message=dict(role="user", content=prompt)))
         lines.append(dict(type="assistant", uuid=assistant_uuid, parentUuid=user_uuid, sessionId=session_id,
-            timestamp=_iso(now + timedelta(seconds=i * 2 + 1)), message=dict(role="assistant", content=[dict(type="text", text=_strip_thinking(response))])))
+            timestamp=_iso(now + timedelta(seconds=i * 2 + 1)), message=dict(role="assistant", content=[dict(type="text", text=strip_thinking(response))])))
         parent_uuid = assistant_uuid
     path.write_text("".join(json.dumps({k:v for k,v in line.items() if v is not None}, ensure_ascii=False, separators=(",", ":")) + "\n" for line in lines),
         encoding="utf-8")
-    return SimpleNamespace(session_id=session_id, path=path)
+    return dict(session_id=session_id, path=path)
 
 
-class ClaudeBackend:
+class ClaudeBackend(BaseBackend):
     formatter_cls = AsyncStreamFormatter
 
     def __init__(self, shell=None, cwd=None, system_prompt="", plugin_dirs=None, cli_path=None):
-        self.shell = shell
-        self.cwd = str(Path(cwd or os.getcwd()).resolve())
-        self.system_prompt = system_prompt
-        self.plugin_dirs = [str(Path(o).resolve()) for o in (plugin_dirs or [])]
-        self.cli_path = cli_path
+        super().__init__(shell=shell, cwd=cwd, system_prompt=system_prompt, plugin_dirs=plugin_dirs, cli_path=cli_path)
         self._tool_server = None
-
-    @property
-    def ns(self): return getattr(self.shell, "user_ns", {})
 
     def _sdk_server(self):
         if self._tool_server is not None: return self._tool_server or None
-        tools = sdk_mcp_tools(self.ns, tool)
+        tools = self.tools.claude_sdk_tools(tool)
         self._tool_server = create_sdk_mcp_server(name="ipyai", tools=tools) if tools else False
         return self._tool_server or None
 
     def _options(self, *, model, think=None, resume=None, include_partial_messages=True, allow_tools=True):
         tools = BUILTIN_TOOLS if allow_tools else []
-        custom = [f"mcp__ipy__{o}" for o in available_tool_names(self.ns)] if allow_tools else []
+        custom = self.tools.claude_allowed_tool_names() if allow_tools else []
         server = self._sdk_server() if allow_tools else None
         allowed_tools = [*BUILTIN_TOOLS, *custom] if allow_tools else []
-        plugins = [dict(type="local", path=o) for o in self.plugin_dirs]
-        return ClaudeAgentOptions(model=model, cwd=self.cwd, cli_path=self.cli_path, system_prompt=self.system_prompt, tools=tools,
+        plugins = [dict(type="local", path=o) for o in self.ctx.plugin_dirs]
+        return ClaudeAgentOptions(model=model, cwd=self.ctx.cwd, cli_path=self.ctx.cli_path, system_prompt=self.ctx.system_prompt, tools=tools,
             allowed_tools=allowed_tools, include_partial_messages=include_partial_messages, continue_conversation=bool(resume), resume=resume,
-            effort=_effort(think), setting_sources=["user", "project"], mcp_servers={"ipy": server} if server else {},
+            effort=effort_level(think), setting_sources=["user", "project"], mcp_servers={"ipy": server} if server else {},
             plugins=plugins)
 
-    async def complete(self, prompt, *, model):
-        options = self._options(model=model, include_partial_messages=False, allow_tools=False)
-        async with ClaudeSDKClient(options=options) as client:
-            await client.query(prompt)
-            parts = []
-            async for message in client.receive_response():
-                if isinstance(message, AssistantMessage):
-                    parts += [block.text for block in message.content if isinstance(block, TextBlock)]
-            return FullResponse("".join(parts).strip())
+    async def prepare_turn(self, *, prompt, model, think="l", provider_session_id=None, seed=None, tool_mode="on", ephemeral=False):
+        seed = seed or ConversationSeed()
+        state = {}
+        session_id = provider_session_id
+        if not session_id and seed.turns:
+            info = write_synthetic_session(self.ctx.cwd, [(turn.full_prompt, replayable_assistant_text(turn.response)) for turn in seed.turns])
+            session_id = info["session_id"]
+            state["provider_session_id"] = session_id
+        options = self._options(model=model, think=think, resume=session_id, include_partial_messages=True, allow_tools=tool_mode != "off")
 
-    async def stream_turn(self, prompt, *, model, think="l", session_id=None, records=None, events=None, state=None):
-        state = state if state is not None else {}
-        options = self._options(model=model, think=think, resume=session_id, include_partial_messages=True, allow_tools=True)
-        async with ClaudeSDKClient(options=options) as client:
-            await client.query(prompt)
-            thinking_open = False
-            tools = {}
-            async for message in client.receive_response():
-                if isinstance(message, StreamEvent):
-                    event = message.event
-                    if event.get("type") == "content_block_start" and event.get("content_block", {}).get("type") == "thinking":
-                        if not thinking_open:
-                            thinking_open = True
-                            yield dict(kind="thinking_start")
-                    elif event.get("type") == "content_block_delta":
-                        delta = event.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            text = delta.get("text", "")
-                            if text: yield text
-                        elif delta.get("type") == "thinking_delta":
+        async def _stream():
+            async with ClaudeSDKClient(options=options) as client:
+                await client.query(prompt)
+                thinking_open = False
+                tools = {}
+                async for message in client.receive_response():
+                    if isinstance(message, StreamEvent):
+                        event = message.event
+                        if event.get("type") == "content_block_start" and event.get("content_block", {}).get("type") == "thinking":
                             if not thinking_open:
                                 thinking_open = True
                                 yield dict(kind="thinking_start")
-                            yield dict(kind="thinking_delta", delta=delta.get("thinking", ""))
-                    elif event.get("type") == "content_block_stop" and thinking_open:
-                        thinking_open = False
-                        yield dict(kind="thinking_end")
-                    continue
+                        elif event.get("type") == "content_block_delta":
+                            delta = event.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                text = delta.get("text", "")
+                                if text: yield text
+                            elif delta.get("type") == "thinking_delta":
+                                if not thinking_open:
+                                    thinking_open = True
+                                    yield dict(kind="thinking_start")
+                                yield dict(kind="thinking_delta", delta=delta.get("thinking", ""))
+                        elif event.get("type") == "content_block_stop" and thinking_open:
+                            thinking_open = False
+                            yield dict(kind="thinking_end")
+                        continue
 
-                if isinstance(message, AssistantMessage):
-                    if message.session_id: state["session_id"] = message.session_id
-                    for block in message.content:
-                        if isinstance(block, ToolUseBlock):
-                            tools[block.id] = dict(name=block.name, input=block.input)
-                            yield dict(kind="tool_start", id=block.id, name=block.name, input=block.input)
-                    continue
+                    if isinstance(message, AssistantMessage):
+                        if message.session_id: state["provider_session_id"] = message.session_id
+                        for block in message.content:
+                            if isinstance(block, ToolUseBlock):
+                                tools[block.id] = dict(name=block.name, input=block.input)
+                                yield dict(kind="tool_start", id=block.id, name=block.name, input=block.input)
+                        continue
 
-                if isinstance(message, UserMessage):
-                    blocks = message.content if isinstance(message.content, list) else []
-                    for block in blocks:
-                        if not isinstance(block, ToolResultBlock): continue
-                        meta = tools.get(block.tool_use_id, {})
-                        yield dict(kind="tool_complete", id=block.tool_use_id, name=meta.get("name"), input=meta.get("input"),
-                            content=_stringify_content(block.content), is_error=bool(block.is_error))
-                    continue
+                    if isinstance(message, UserMessage):
+                        blocks = message.content if isinstance(message.content, list) else []
+                        for block in blocks:
+                            if not isinstance(block, ToolResultBlock): continue
+                            meta = tools.get(block.tool_use_id, {})
+                            yield dict(kind="tool_complete", id=block.tool_use_id, name=meta.get("name"), input=meta.get("input"),
+                                content=_stringify_content(block.content), is_error=bool(block.is_error))
+                        continue
 
-                if isinstance(message, ResultMessage):
-                    state["session_id"] = message.session_id
-                    continue
+                    if isinstance(message, ResultMessage):
+                        state["provider_session_id"] = message.session_id
+                        continue
 
-    async def bootstrap_session(self, *, model, think="l", session_id=None, records=None, events=None, state=None):
-        if session_id: return session_id
-        turns = [(full_prompt, response) for _,_,full_prompt,response,_ in records or []]
-        if not turns: return None
-        info = write_synthetic_session(self.cwd, turns)
-        if state is not None: state["session_id"] = info.session_id
-        return info.session_id
+        return self.prepared_turn(_stream(), provider_session_id=session_id, state=state)
 
 
 ClaudeSDKBackend = ClaudeBackend

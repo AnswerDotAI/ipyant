@@ -31,10 +31,11 @@ The wrappers intentionally keep setup small:
 
 - [ipyai/core.py](ipyai/core.py): IPython extension logic, prompt transforms, SQLite bookkeeping, notebook save/load, prompt mode, keybindings, Rich streaming display, backend selection
 - [ipyai/backends.py](ipyai/backends.py): backend registry, canonical backend names, default models
-- [ipyai/claude_client.py](ipyai/claude_client.py): Claude Agent SDK backend, custom MCP tool registration, partial-stream normalization, synthetic session writing
-- [ipyai/api_client.py](ipyai/api_client.py): Claude API backend via `lisette`
-- [ipyai/codex_client.py](ipyai/codex_client.py): Codex app-server backend
-- [ipyai/tooling.py](ipyai/tooling.py): shared custom tool registry, schema generation, and local tool calling helpers
+- [ipyai/backend_common.py](ipyai/backend_common.py): shared backend context/base classes, typed conversation seed types, common stream formatter, replay helpers, and shared tool/command display helpers
+- [ipyai/claude_client.py](ipyai/claude_client.py): Claude Agent SDK backend, custom MCP tool registration, synthetic session writing, and SDK event translation into canonical backend events
+- [ipyai/api_client.py](ipyai/api_client.py): Claude API backend via `lisette`; this is the explicit exception to the common canonical-event formatter path and still uses lisette's native formatter
+- [ipyai/codex_client.py](ipyai/codex_client.py): Codex app-server backend, thread/session orchestration, and app-server event translation into canonical backend events
+- [ipyai/tooling.py](ipyai/tooling.py): shared custom `ToolRegistry`, schema generation, and local tool calling helpers
 - [ipyai/cli.py](ipyai/cli.py): `ipyai` console entry point
 - [tests/conftest.py](tests/conftest.py): minimal shell/history harness with repo-local config paths
 - [tests/test_backends.py](tests/test_backends.py): shared backend test helpers
@@ -57,10 +58,22 @@ The wrappers intentionally keep setup small:
 2. `IPyAIExtension.run_prompt()` reconstructs recent code/output/note context from IPython history.
 3. Variable refs like `$`name`` and shell refs like `!`cmd`` are injected above the prompt.
 4. The selected backend streams the turn:
-   - Claude Agent SDK resumes a provider session when available
-   - Claude API rebuilds history from local prompt records
-   - Codex resumes or bootstraps an app-server thread
+   - `core.py` first builds a typed `ConversationSeed`
+   - each backend then `prepare_turn(...)`s using that seed
+   - Claude Agent SDK resumes or synthesizes a provider session
+   - Claude API rebuilds flat history from the typed seed
+   - Codex resumes or bootstraps an app-server thread from the typed seed
 5. `astream_to_stdout()` renders the response through Rich in TTY mode and stores the final transcript text locally.
+
+Completion policy is shared in `BaseBackend.complete()`:
+
+- empty `ConversationSeed`
+- `provider_session_id=None`
+- `tool_mode="off"`
+- `ephemeral=True`
+- `think="l"`
+
+Backends can still override `complete()` if a provider genuinely requires it, but the default path is now the contract.
 
 ### State Model
 
@@ -74,11 +87,11 @@ There are two layers of state:
 - `claude_prompts` for AI prompt history
 - `sessions.remark` JSON for `cwd`, `backend`, and `provider_session_id`
 
-If prompt history exists locally but `provider_session_id` is missing, backend bootstrap is backend-specific:
+If prompt history exists locally but `provider_session_id` is missing, provider bootstrap is backend-specific:
 
 - Claude Agent SDK synthesizes a Claude transcript JSONL file once
-- Claude API uses the stored prompt history directly
-- Codex starts a new thread and sends the loaded notebook as XML once
+- Claude API uses the typed flat-history seed directly
+- Codex starts a new thread and sends the typed notebook-XML seed once
 
 Notebook save/load is explicit only:
 
@@ -97,6 +110,12 @@ The custom tool story is intentionally small:
 - built-ins: `Bash`, `Edit`, `Read`, `Skill`, `WebFetch`, `WebSearch`, `Write`
 
 `pyrun` does not call back into `InteractiveShell.run_cell*`. It delegates to `safepyrun`, looked up in `shell.user_ns`, matching the old `ipycodex` direct-call boundary and avoiding nested IPython cell execution.
+
+Provider-specific tool exposure now fans out from the shared `ToolRegistry`:
+
+- Claude SDK: MCP tool objects plus allowed `mcp__ipy__...` names
+- Claude API: OpenAI-style function schemas
+- Codex: app-server `dynamicTools`
 
 The `ipyai` CLI loads `safepyrun` before `ipyai`, so normal terminal sessions get `pyrun` automatically. `ipyai` seeds the other custom tools into `shell.user_ns` directly.
 

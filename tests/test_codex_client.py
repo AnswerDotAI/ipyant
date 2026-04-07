@@ -18,6 +18,20 @@ def test_compact_tool_leaves_blank_line_after_summary():
     assert text == "\n\n🔧 pyrun(code='1+1') => 2\n\n"
 
 
+class FakeCodexClient:
+    def __init__(self):
+        self.started = []
+        self.turns = []
+
+    async def start_thread(self, **kwargs):
+        self.started.append(kwargs)
+        return "thread_1"
+
+    async def turn_stream(self, *args, **kwargs):
+        self.turns.append((args, kwargs))
+        yield "done"
+
+
 async def test_async_stream_formatter_shows_live_tool_and_stores_compact_summary():
     fmt = cc.AsyncStreamFormatter()
     fmt.is_tty = True
@@ -30,6 +44,18 @@ async def test_async_stream_formatter_shows_live_tool_and_stores_compact_summary
     assert seen[0] == "⌛ `pyrun(code='1+1')`"
     assert "🔧 pyrun(code='1+1') => 2\n\n2" in fmt.final_text
     assert seen[-1].endswith("\n\n2")
+
+
+async def test_complete_uses_toolless_ephemeral_turn(shell, monkeypatch):
+    fake = FakeCodexClient()
+    monkeypatch.setattr(cc, "get_codex_client", lambda: fake)
+    backend = cc.CodexBackend(shell=shell, system_prompt="system")
+
+    res = await backend.complete("hi", model="gpt-5.4-mini")
+
+    assert str(res) == "done"
+    assert fake.started == [dict(model="gpt-5.4-mini", sp="system", dynamic_tools=None, ephemeral=True, cwd=backend.ctx.cwd)]
+    assert fake.turns == [(("thread_1", "hi"), dict(ns={}, think="l", cwd=backend.ctx.cwd))]
 
 
 async def test_consume_turn_emits_tool_start_and_complete_events():

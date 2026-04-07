@@ -1,21 +1,16 @@
-import asyncio, ast, html, json, os, re, shlex
+import asyncio, json, os, shlex
 from collections import defaultdict
 from importlib.metadata import version
 
-from .tooling import call_ns_tool, openai_tool_schemas
+from .backend_common import (BaseBackend, CommonStreamFormatter, ConversationSeed, compact_cmd, compact_tool, effort_level,
+    seed_to_notebook_xml, tool_call, tool_name)
+from .tooling import call_ns_tool
 
 _HIST_SP = ("\n\nIf the current user input contains an <ipython-notebook> block, treat it as serialized prior notebook state. "
     "Respect all code, notes, and earlier prompt/response pairs contained inside it.")
-_TOOL_PREFIX_RE = re.compile(r"^mcp__\w+__")
-
-
-def _blockquote(text): return "".join(f"> {line}\n" if line.strip() else ">\n" for line in text.splitlines()) if text else ""
 
 
 def _json(obj): return json.dumps(obj, ensure_ascii=False, default=str)
-
-
-def _xml_text(text): return html.escape(text or "", quote=False)
 
 
 def _pkg_version():
@@ -28,48 +23,6 @@ def _codex_cmd():
     return [*shlex.split(raw), "app-server", "--listen", "stdio://"]
 
 
-def _fenced_block(text, info=""):
-    text = text or ""
-    fence = "~" * 3
-    while fence in text: fence += "~"
-    if text and not text.endswith("\n"): text += "\n"
-    return f"{fence}{info}\n{text}{fence}\n"
-
-
-def _dynamic_tools(tools):
-    res = []
-    for o in tools or []:
-        fn = dict(o.get("function") or {})
-        if not fn.get("name"): continue
-        res.append(dict(name=fn["name"], description=fn.get("description") or "", inputSchema=fn.get("parameters") or dict(type="object")))
-    return res or None
-
-
-def _effort_level(level): return dict(l="low", m="medium", h="high").get(level, level or None)
-
-
-def _tool_name(name): return _TOOL_PREFIX_RE.sub("", name or "")
-
-
-def _tool_call(name, args):
-    name = _tool_name(name)
-    return f"{name}()" if not args else f"{name}({', '.join(f'{k}={v!r}' for k,v in sorted(args.items()))})"
-
-
-def _compact_tool(name, args, result):
-    call = _tool_call(name, args)
-    res = (result or "").strip().replace("\n", " ")
-    if len(res) > 80: res = res[:77] + "..."
-    return f"\n\n🔧 {call} => {res}\n\n" if res else f"\n\n🔧 {call}\n\n"
-
-
-def _compact_cmd(command, output, exit_code):
-    res = (output or "").strip().replace("\n", " ")
-    if len(res) > 80: res = res[:77] + "..."
-    status = "" if exit_code in (None, 0) else f" [exit {exit_code}]"
-    return f"\n\n🔧 {command}{status} => {res}\n\n" if res else f"\n\n🔧 {command}{status}\n\n"
-
-
 def _content_items_text(items):
     if not items: return ""
     parts = []
@@ -79,26 +32,6 @@ def _content_items_text(items):
     return "\n".join(o for o in parts if o)
 
 
-def _is_note(source):
-    try: tree = ast.parse(source)
-    except SyntaxError: return False
-    return (len(tree.body) == 1 and isinstance(tree.body[0], ast.Expr) and isinstance(tree.body[0].value, ast.Constant)
-        and isinstance(tree.body[0].value.value, str))
-
-
-def _notebook_xml(events):
-    parts = ["<ipython-notebook>"]
-    for o in events or []:
-        if o.get("kind") == "code":
-            tag = "note" if _is_note(o.get("source", "")) else "code"
-            parts.append(f'<{tag} line="{int(o.get("line", 0))}">{_xml_text(o.get("source", ""))}</{tag}>')
-        elif o.get("kind") == "prompt":
-            parts.append(f'<turn line="{int(o.get("history_line", 0))}"><user>{_xml_text(o.get("full_prompt", ""))}</user>'
-                f'<assistant>{_xml_text(o.get("response", ""))}</assistant></turn>')
-    parts.append("</ipython-notebook>")
-    return "".join(parts)
-
-
 async def _call_tool(ns, name, args):
     fn = ns.get(name)
     if not callable(fn): return dict(success=False, contentItems=[dict(type="inputText", text=f"Error: tool {name!r} is not defined")])
@@ -106,88 +39,8 @@ async def _call_tool(ns, name, args):
     except Exception as e: return dict(success=False, contentItems=[dict(type="inputText", text=f"Error: {e}")])
 
 
-class AsyncStreamFormatter:
-    def __init__(self):
-        self.is_tty = False
-        self.final_text = ""
-        self.display_text = ""
-        self._live_commands = {}
-        self._tool_text = ""
-        self._thinking_text = ""
-
-    def _update_display(self):
-        parts = []
-        if self._thinking_text: parts.append(_blockquote(self._thinking_text))
-        if self.final_text: parts.append(self.final_text)
-        if self._tool_text: parts.append(self._tool_text)
-        live = "\n\n".join(self._live_command_text(o) for o in self._live_commands.values())
-        if live: parts.append(live)
-        self.display_text = "\n\n".join(o.rstrip() for o in parts if o).rstrip()
-
-    def _append_final(self, text):
-        if text: self.final_text += text
-        self._update_display()
-
-    def _live_command_text(self, state):
-        cmd = html.escape(state.get("command") or "command")
-        text = f"⌛ <code>{cmd}</code>"
-        if state.get("output"): text += "\n\n" + _fenced_block(state["output"], "text")
-        return text.rstrip()
-
-    def _format_event(self, event):
-        if isinstance(event, str):
-            self._append_final(event)
-            return event
-        if not isinstance(event, dict): return ""
-        kind = event.get("kind")
-        if kind == "thinking_start":
-            self._thinking_text = ""
-            self._update_display()
-            return ""
-        if kind == "thinking_delta":
-            self._thinking_text += event.get("delta", "")
-            self._update_display()
-            return ""
-        if kind == "thinking_end":
-            stored = f"<thinking>\n{self._thinking_text}\n</thinking>\n\n" if self._thinking_text else ""
-            self._thinking_text = ""
-            self._append_final(stored)
-            return "" if self.is_tty else stored
-        if kind == "tool_start":
-            self._tool_text = f"⌛ `{_tool_call(event.get('name') or 'tool', event.get('input') or {})}`"
-            self._update_display()
-            return ""
-        if kind == "tool_complete":
-            self._tool_text = ""
-            text = _compact_tool(event.get("name") or "tool", event.get("input") or {}, event.get("content") or "")
-            self._append_final(text)
-            return "" if self.is_tty else text
-        if kind == "command_start":
-            self._live_commands[event.get("id")] = dict(command=event.get("command"), cwd=event.get("cwd"), output="")
-            self._update_display()
-            return ""
-        if kind == "command_delta":
-            state = self._live_commands.setdefault(event.get("id"), dict(command=event.get("command"), cwd=event.get("cwd"), output=""))
-            if event.get("command") and not state.get("command"): state["command"] = event["command"]
-            state["output"] += event.get("delta", "")
-            self._update_display()
-            return ""
-        if kind == "command_complete":
-            self._live_commands.pop(event.get("id"), None)
-            text = event.get("text", "")
-            self._append_final(text)
-            return "" if self.is_tty else text
-        text = event.get("text", "")
-        if text: self._append_final(text)
-        return text
-
-    async def format_stream(self, stream):
-        async for o in stream: yield self._format_event(o)
-
-
-class FullResponse(str):
-    @property
-    def content(self): return str(self)
+AsyncStreamFormatter = CommonStreamFormatter
+_tool_name,_tool_call,_compact_tool,_compact_cmd = tool_name,tool_call,compact_tool,compact_cmd
 
 
 class _CodexAppServer:
@@ -266,27 +119,27 @@ class _CodexAppServer:
             await self.notify("initialized")
             self.initialized = True
 
-    async def start_thread(self, *, model=None, sp="", tools=None, ephemeral=False):
+    async def start_thread(self, *, model=None, sp="", dynamic_tools=None, ephemeral=False, cwd=None):
         await self.ensure_initialized()
-        params = dict(cwd=os.getcwd(), approvalPolicy="never", sandbox="workspace-write", ephemeral=ephemeral, personality="pragmatic")
+        params = dict(cwd=cwd or os.getcwd(), approvalPolicy="never", sandbox="workspace-write", ephemeral=ephemeral, personality="pragmatic")
         if model: params["model"] = model
         if sp: params["developerInstructions"] = sp + _HIST_SP
-        if (dtools := _dynamic_tools(tools)): params["dynamicTools"] = dtools
+        if dynamic_tools: params["dynamicTools"] = dynamic_tools
         result = await self.request("thread/start", params)
         return result["thread"]["id"]
 
-    async def resume_thread(self, thread_id, *, sp=""):
+    async def resume_thread(self, thread_id, *, sp="", cwd=None):
         await self.ensure_initialized()
-        params = dict(threadId=thread_id, cwd=os.getcwd(), approvalPolicy="never", sandbox="workspace-write", personality="pragmatic")
+        params = dict(threadId=thread_id, cwd=cwd or os.getcwd(), approvalPolicy="never", sandbox="workspace-write", personality="pragmatic")
         if sp: params["developerInstructions"] = sp + _HIST_SP
         result = await self.request("thread/resume", params)
         return result["thread"]["id"]
 
-    async def turn_stream(self, thread_id, prompt, *, ns=None, think=None, output_schema=None):
+    async def turn_stream(self, thread_id, prompt, *, ns=None, think=None, output_schema=None, cwd=None):
         async with self.turn_lock:
-            params = dict(threadId=thread_id, input=[dict(type="text", text=prompt, text_elements=[])], cwd=os.getcwd(),
+            params = dict(threadId=thread_id, input=[dict(type="text", text=prompt, text_elements=[])], cwd=cwd or os.getcwd(),
                 approvalPolicy="never", personality="pragmatic", summary="detailed")
-            if (effort := _effort_level(think)): params["effort"] = effort
+            if (effort := effort_level(think)): params["effort"] = effort
             if output_schema is not None: params["outputSchema"] = output_schema
             turn = await self.request("turn/start", params)
             turn_id = turn["turn"]["id"]
@@ -380,8 +233,6 @@ class _CodexAppServer:
         if typ == "agentMessage":
             if item.get("id") in agent_seen: return ""
             return item.get("text", "")
-        if typ == "dynamicToolCall":
-            return _compact_tool(item.get("tool", "tool"), item.get("arguments") or {}, _content_items_text(item.get("contentItems")))
         if typ == "commandExecution":
             output = item.get("aggregatedOutput")
             if output is None: output = cmd_output.get(item.get("id"), "")
@@ -398,42 +249,28 @@ def get_codex_client():
     return _client
 
 
-class CodexBackend:
+class CodexBackend(BaseBackend):
     formatter_cls = AsyncStreamFormatter
 
-    def __init__(self, shell=None, cwd=None, system_prompt="", plugin_dirs=None, cli_path=None):
-        self.shell = shell
-        self.cwd = cwd
-        self.system_prompt = system_prompt
-
-    @property
-    def ns(self): return getattr(self.shell, "user_ns", {})
-
-    def _tools(self): return openai_tool_schemas(self.ns)
-
-    async def complete(self, prompt, *, model):
+    async def prepare_turn(self, *, prompt, model, think="l", provider_session_id=None, seed=None, tool_mode="on", ephemeral=False):
+        seed = seed or ConversationSeed()
         client = get_codex_client()
-        thread_id = await client.start_thread(model=model, sp=self.system_prompt, tools=self._tools(), ephemeral=True)
-        text = ""
-        async for chunk in client.turn_stream(thread_id, prompt, think="l"):
-            if isinstance(chunk, str): text += chunk
-        return FullResponse(text.strip())
-
-    async def bootstrap_session(self, *, model, think="l", session_id=None, records=None, events=None, state=None):
-        client = get_codex_client()
+        state = {}
+        session_id = provider_session_id
         if session_id:
             try:
-                session_id = await client.resume_thread(session_id, sp=self.system_prompt)
-                if state is not None: state["session_id"] = session_id
-                return session_id
+                session_id = await client.resume_thread(session_id, sp=self.ctx.system_prompt, cwd=self.ctx.cwd)
+                state["provider_session_id"] = session_id
             except Exception: pass
-        thread_id = await client.start_thread(model=model, sp=self.system_prompt, tools=self._tools(), ephemeral=True)
-        if events:
-            prompt = _notebook_xml(events) + "The XML above describes a notebook already loaded into the live IPython session. Treat it as prior "
-            prompt += "session context for this thread. Reply with ok and nothing else."
-            async for _ in client.turn_stream(thread_id, prompt, ns=self.ns, think=think): pass
-        if state is not None: state["session_id"] = thread_id
-        return thread_id
+        if not session_id:
+            dynamic_tools = self.tools.codex_dynamic_tools() if tool_mode != "off" else None
+            session_id = await client.start_thread(model=model, sp=self.ctx.system_prompt, dynamic_tools=dynamic_tools, ephemeral=ephemeral, cwd=self.ctx.cwd)
+            if seed.startup_events:
+                seed_prompt = seed_to_notebook_xml(seed) + "The XML above describes a notebook already loaded into the live IPython session. "
+                seed_prompt += "Treat it as prior session context for this thread. Reply with ok and nothing else."
+                async for _ in client.turn_stream(session_id, seed_prompt, ns=self.ns, think=think, cwd=self.ctx.cwd): pass
+            state["provider_session_id"] = session_id
 
-    async def stream_turn(self, prompt, *, model, think="l", session_id=None, records=None, events=None, state=None):
-        async for chunk in get_codex_client().turn_stream(session_id, prompt, ns=self.ns, think=think): yield chunk
+        ns = self.ns if tool_mode != "off" else {}
+        stream = client.turn_stream(session_id, prompt, ns=ns, think=think, cwd=self.ctx.cwd)
+        return self.prepared_turn(stream, provider_session_id=session_id, state=state)
