@@ -28,6 +28,9 @@ version = {attr = "ipyai.__version__"}
 [tool.setuptools.packages.find]
 include = ["ipyai*"]
 
+[tool.setuptools.package-data]
+ipyai = ["extensions/*.ts"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

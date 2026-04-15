@@ -9,7 +9,7 @@ AI-powered IPython shell
 
 options:
   -h, --help  show this help message and exit
-  -b BACKEND  backend: claude-sdk (default), claude-api, codex
+  -b BACKEND  backend: claude-sdk (default), claude-api, codex, pi
   -r [ID]     resume session (no ID = pick from list)
   -l FILE     load notebook (.ipynb)
   -p          start in prompt mode"""
