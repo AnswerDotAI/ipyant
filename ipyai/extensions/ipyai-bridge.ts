@@ -54,35 +54,64 @@ export default function ipyaiBridge(pi: ExtensionAPI) {
     return Type.Unsafe(schema);
   };
 
-  const registerTools = (tools: BridgeTool[]) => {
-    for (const tool of tools) {
-      if (!tool?.name || registered.has(tool.name)) continue;
-      registered.add(tool.name);
-      const parameters = wrapParameters(tool.parameters);
-      pi.registerTool({
-        name: tool.name,
-        label: tool.name,
-        description: tool.description || `Call Python tool ${tool.name}`,
-        parameters,
-        async execute(_toolCallId, params) {
-          const id = randomUUID();
-          const resultPromise = new Promise<any>((resolve, reject) => {
-            const timer = setTimeout(() => {
-              pending.delete(id);
-              reject(new Error(`Tool call timed out: ${tool.name}`));
-            }, TIMEOUT_MS);
-            pending.set(id, { resolve, reject, timer });
-          });
-          send({ type: "tool_call", id, name: tool.name, args: params || {} });
-          const result = await resultPromise;
-          return {
-            content: Array.isArray(result?.content) ? result.content : [{ type: "text", text: String(result?.error || "") }],
-            details: result?.details,
-            isError: Boolean(result?.isError),
-          };
-        },
-      });
+  const ensureActiveTools = (toolNames: string[]) => {
+    if (toolNames.length === 0) return;
+    const active = new Set(pi.getActiveTools());
+    let changed = false;
+    for (const name of toolNames) {
+      if (!active.has(name)) {
+        active.add(name);
+        changed = true;
+      }
     }
+    if (changed) pi.setActiveTools([...active]);
+  };
+
+  const registerTools = (tools: BridgeTool[]) => {
+    const successful: string[] = [];
+
+    for (const tool of tools) {
+      if (!tool?.name) continue;
+
+      if (!registered.has(tool.name)) {
+        try {
+          const parameters = wrapParameters(tool.parameters);
+          pi.registerTool({
+            name: tool.name,
+            label: tool.name,
+            description: tool.description || `Call Python tool ${tool.name}`,
+            parameters,
+            async execute(_toolCallId, params) {
+              const id = randomUUID();
+              const resultPromise = new Promise<any>((resolve, reject) => {
+                const timer = setTimeout(() => {
+                  pending.delete(id);
+                  reject(new Error(`Tool call timed out: ${tool.name}`));
+                }, TIMEOUT_MS);
+                pending.set(id, { resolve, reject, timer });
+              });
+              send({ type: "tool_call", id, name: tool.name, args: params || {} });
+              const result = await resultPromise;
+              return {
+                content: Array.isArray(result?.content) ? result.content : [{ type: "text", text: String(result?.error || "") }],
+                details: result?.details,
+                isError: Boolean(result?.isError),
+              };
+            },
+          });
+          registered.add(tool.name);
+        } catch (error) {
+          console.error(`ipyai bridge: failed to register tool ${tool.name}:`, error);
+          continue;
+        }
+      }
+
+      successful.push(tool.name);
+    }
+
+    // In pi --no-tools mode, dynamic post-start registrations only auto-activate
+    // truly new names. Overridden built-in names like "bash" must be activated explicitly.
+    ensureActiveTools(successful);
   };
 
   const handleMessage = (msg: any) => {
