@@ -3,13 +3,15 @@ from dataclasses import dataclass
 from .api_client import ClaudeAPIBackend
 from .claude_client import ClaudeSDKBackend
 from .codex_client import CodexBackend
+from .pi_client import PiBackend
 
 BACKEND_CLAUDE_SDK = "claude-sdk"
 BACKEND_CLAUDE_API = "claude-api"
 BACKEND_CODEX = "codex"
+BACKEND_PI = "pi"
 DEFAULT_BACKEND = BACKEND_CLAUDE_SDK
 BACKEND_ALIASES = {"claude": BACKEND_CLAUDE_SDK, "sdk": BACKEND_CLAUDE_SDK, "agent": BACKEND_CLAUDE_SDK, "claude-sdk": BACKEND_CLAUDE_SDK,
-    "api": BACKEND_CLAUDE_API, "claude-api": BACKEND_CLAUDE_API, "codex": BACKEND_CODEX}
+    "api": BACKEND_CLAUDE_API, "claude-api": BACKEND_CLAUDE_API, "codex": BACKEND_CODEX, "pi": BACKEND_PI, "pi-rpc": BACKEND_PI}
 
 
 @dataclass(frozen=True)
@@ -23,7 +25,8 @@ class BackendSpec:
 
 BACKENDS = {BACKEND_CLAUDE_SDK: BackendSpec(BACKEND_CLAUDE_SDK, "Claude Agent SDK", ClaudeSDKBackend, "sonnet", "haiku"),
     BACKEND_CLAUDE_API: BackendSpec(BACKEND_CLAUDE_API, "Claude API", ClaudeAPIBackend, "claude-sonnet-4-6", "claude-haiku-4-5-20251001"),
-    BACKEND_CODEX: BackendSpec(BACKEND_CODEX, "Codex", CodexBackend, "gpt-5.4", "gpt-5.4-mini")}
+    BACKEND_CODEX: BackendSpec(BACKEND_CODEX, "Codex", CodexBackend, "gpt-5.4", "gpt-5.4-mini"),
+    BACKEND_PI: BackendSpec(BACKEND_PI, "Pi RPC", PiBackend, "opencode-go/kimi-k2.5", "opencode-go/qwen3.5-plus")}
 
 
 def normalize_backend_name(name=None):
