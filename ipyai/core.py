@@ -105,7 +105,7 @@ def prompt_from_lines(lines):
 def transform_dots(lines, magic=MAGIC_NAME):
     prompt = prompt_from_lines(lines)
     if prompt is None: return lines
-    return [f"get_ipython().run_cell_magic({magic!r}, '', {prompt!r})\n"]
+    return [f"await get_ipython().run_cell_magic({magic!r}, '', {prompt!r})\n"]
 
 
 def transform_prompt_mode(lines, magic=MAGIC_NAME):
@@ -116,7 +116,7 @@ def transform_prompt_mode(lines, magic=MAGIC_NAME):
     if stripped.startswith(("!", "%")): return lines
     if stripped.startswith(";"): return [first.replace(";", "", 1)] + lines[1:]
     text = "".join(lines).replace("\\\n", "\n")
-    return [f"get_ipython().run_cell_magic({magic!r}, '', {text!r})\n"]
+    return [f"await get_ipython().run_cell_magic({magic!r}, '', {text!r})\n"]
 
 
 def _tag(name, content="", **attrs):
