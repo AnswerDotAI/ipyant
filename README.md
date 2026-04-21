@@ -1,6 +1,6 @@
 # ipyai
 
-`ipyai` is a terminal IPython extension with three backends:
+`ipyai` is a terminal IPython extension with three AI backends:
 
 - Claude Agent SDK (`claude-sdk`, default)
 - Claude API (`claude-api`)
@@ -22,9 +22,9 @@ pip install -e ipyai
 
 ## How to Use Prompts
 
-There are several ways to send a prompt to Claude from ipyai:
+There are several ways to send an AI prompt from ipyai:
 
-**Dot prefix (`.`)** — In normal IPython mode, start any line with `.` to send it as a prompt. Everything after the dot is sent to Claude. Continuation lines (without a dot) are included too, so you can write multi-line prompts:
+**Dot prefix (`.`)** — In normal IPython mode, start any line with `.` to send it as a prompt. Everything after the dot is sent to the selected backend. Continuation lines (without a dot) are included too, so you can write multi-line prompts:
 
 ```python
 .explain what this dataframe transform is doing
@@ -36,7 +36,7 @@ focus on state management
 and failure cases
 ```
 
-**Prompt mode** — When prompt mode is on, *every* line you type is sent to Claude by default. To run normal Python code instead, prefix the line with `;`. Shell commands (`!`) and magics (`%`) still work as usual. There are three ways to enable prompt mode:
+**Prompt mode** — When prompt mode is on, *every* line you type is sent as an AI prompt by default. To run normal Python code instead, prefix the line with `;`. Shell commands (`!`) and magics (`%`) still work as usual. There are three ways to enable prompt mode:
 
 - **`opt-p`** (Alt-p) — toggle prompt mode on/off at any time from the terminal
 - **`-p` flag** — start ipyai in prompt mode: `ipyai -p`
@@ -76,7 +76,7 @@ On exit, `ipyai` prints the session ID so you can resume later.
 
 ## Usage
 
-`ipyai` is a normal IPython session — you can run Python code exactly as you would in plain IPython. On top of that, you can send prompts to Claude as described above. `%ipyai` / `%%ipyai` magics are also available.
+`ipyai` is a normal IPython session — you can run Python code exactly as you would in plain IPython. On top of that, you can send prompts to the selected AI backend as described above. `%ipyai` / `%%ipyai` magics are also available.
 
 Useful commands:
 
@@ -105,7 +105,7 @@ For each AI prompt, `ipyai` sends:
 - referenced live variables as `<variable>`
 - referenced shell command output as `<shell>`
 
-Prompts are stored in SQLite in a dedicated `claude_prompts` table. Session metadata is stored in IPython's `sessions.remark` JSON, including `cwd`, `backend`, and `provider_session_id`.
+Prompt history is stored in SQLite; for compatibility, the table is currently named `claude_prompts`. Session metadata is stored in IPython's `sessions.remark` JSON, including `cwd`, `backend`, and `provider_session_id`.
 
 ## Tools
 
@@ -119,7 +119,7 @@ Prompts are stored in SQLite in a dedicated `claude_prompts` table. Session meta
 - `lnhashview_file`: view hash-addressed file lines for verified edits
 - `exhash_file`: apply verified hash-addressed edits to a file
 
-It also enables these built-in Claude Code tools:
+When using the Claude Agent SDK backend, it also enables these built-in Claude Code tools:
 
 - `Bash`
 - `Edit`
@@ -134,7 +134,7 @@ The `ipyai` CLI loads `safepyrun` before `ipyai`, so `pyrun` is available by def
 
 ## Skills
 
-Skills are Claude-native. `ipyai` enables the built-in `Skill` tool and loads normal Claude user/project skills through the Agent SDK.
+When using the Claude Agent SDK backend, `ipyai` enables the built-in `Skill` tool and loads normal Claude user/project skills through the Agent SDK.
 
 ## Notebook Save/Load
 
