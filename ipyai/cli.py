@@ -15,12 +15,16 @@ options:
   -p          start in prompt mode"""
 
 
-def main():
-    if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
+def main(args=None):
+    if args is None: args = sys.argv[1:]
+    if "-h" in args or "--help" in args:
         print(_HELP)
         return
     if not os.environ.get("ANTHROPIC_API_KEY") and os.environ.get("ANTHROPIC_KEY"):
         os.environ["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_KEY"]
-    _, ipython_args = parse_flags()
+    _, ipython_args = parse_flags(args)
     start_ipython(argv=["--ext", "ipythonng", "--ext", "safepyrun", "--ext", "ipyai", "--HistoryManager.db_log_output=True", "--no-confirm-exit", "--no-banner",
         *ipython_args])
+
+def main_claude(): main(["-b", "claude-api"] + sys.argv[1:])
+def main_codex():  main(["-b", "codex"]      + sys.argv[1:])
