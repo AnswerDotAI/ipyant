@@ -29,20 +29,6 @@ class ToolRegistry:
 
     async def call_text(self, name, args=None): return await call_ns_tool(self.ns, name, args)
 
-    def claude_sdk_tools(self, sdk_tool):
-        res = []
-        for name in self.names():
-            try: schema = get_schema_nm(name, self.ns)
-            except Exception: continue
-
-            @sdk_tool(schema["name"], schema["description"], schema["input_schema"])
-            async def _tool(args, _name=name):
-                try: return dict(content=[dict(type="text", text=await self.call_text(_name, args))])
-                except Exception as e: return dict(content=[dict(type="text", text=f"Error: {e}")], is_error=True)
-
-            res.append(_tool)
-        return res
-
 
 def available_tool_names(ns): return ToolRegistry(ns).names()
 
@@ -56,6 +42,3 @@ async def call_ns_tool(ns, name, args=None):
     res = fn(**(args or {}))
     if inspect.isawaitable(res): res = await res
     return _result_text(res)
-
-
-def sdk_mcp_tools(ns, sdk_tool): return ToolRegistry(ns).claude_sdk_tools(sdk_tool)

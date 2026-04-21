@@ -2,12 +2,12 @@ import json, re
 
 from safepyrun import RunPython
 
-from ipyai.backends import BACKEND_CLAUDE_API, BACKEND_CLAUDE_SDK
+from ipyai.backends import BACKEND_CLAUDE_API, BACKEND_CLAUDE_CLI
 from ipyai.core import IPyAIExtension, LAST_RESPONSE
 
 
 def _backend_model(backend_name):
-    if backend_name == BACKEND_CLAUDE_SDK: return "haiku"
+    if backend_name == BACKEND_CLAUDE_CLI: return "haiku"
     if backend_name == BACKEND_CLAUDE_API: return "claude-haiku-4-5-20251001"
     return "gpt-5.4-mini"
 
