@@ -27,4 +27,4 @@ def main(args=None):
         *ipython_args])
 
 def main_claude(): main(["-b", "claude-api"] + sys.argv[1:])
-def main_codex():  main(["-b", "codex"]      + sys.argv[1:])
+def main_codex():  main(["-b", "codex-api"]      + sys.argv[1:])
