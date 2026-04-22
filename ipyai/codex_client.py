@@ -4,7 +4,6 @@ from importlib.metadata import version
 
 from .backend_common import (BaseBackend, CommonStreamFormatter, ConversationSeed, compact_cmd, compact_tool, effort_level,
     seed_to_notebook_xml, tool_call, tool_name)
-from .tooling import call_ns_tool
 
 _HIST_SP = ("\n\nIf the current user input contains an <ipython-notebook> block, treat it as serialized prior notebook state. "
     "Respect all code, notes, and earlier prompt/response pairs contained inside it.")
@@ -32,10 +31,10 @@ def _content_items_text(items):
     return "\n".join(o for o in parts if o)
 
 
-async def _call_tool(ns, name, args):
-    fn = ns.get(name)
-    if not callable(fn): return dict(success=False, contentItems=[dict(type="inputText", text=f"Error: tool {name!r} is not defined")])
-    try: return dict(success=True, contentItems=[dict(type="inputText", text=await call_ns_tool(ns, name, args))])
+async def _call_tool(registry, name, args):
+    if registry is None:
+        return dict(success=False, contentItems=[dict(type="inputText", text=f"Error: tool {name!r} is not defined")])
+    try: return dict(success=True, contentItems=[dict(type="inputText", text=await registry.call_text(name, args))])
     except Exception as e: return dict(success=False, contentItems=[dict(type="inputText", text=f"Error: {e}")])
 
 
@@ -135,7 +134,7 @@ class _CodexAppServer:
         result = await self.request("thread/resume", params)
         return result["thread"]["id"]
 
-    async def turn_stream(self, thread_id, prompt, *, ns=None, think=None, output_schema=None, cwd=None):
+    async def turn_stream(self, thread_id, prompt, *, tools=None, think=None, output_schema=None, cwd=None):
         async with self.turn_lock:
             params = dict(threadId=thread_id, input=[dict(type="text", text=prompt, text_elements=[])], cwd=cwd or os.getcwd(),
                 approvalPolicy="never", personality="pragmatic", summary="detailed")
@@ -143,7 +142,7 @@ class _CodexAppServer:
             if output_schema is not None: params["outputSchema"] = output_schema
             turn = await self.request("turn/start", params)
             turn_id = turn["turn"]["id"]
-            consumer = self._consume_turn(thread_id, turn_id, ns or {})
+            consumer = self._consume_turn(thread_id, turn_id, tools)
             try:
                 async for chunk in consumer: yield chunk
             except (asyncio.CancelledError, GeneratorExit):
@@ -152,7 +151,7 @@ class _CodexAppServer:
                 except Exception: pass
                 raise
 
-    async def _consume_turn(self, thread_id, turn_id, ns):
+    async def _consume_turn(self, thread_id, turn_id, tools):
         agent_seen,cmd_output,cmd_items = set(),defaultdict(str),{}
         saw_text = thinking = False
         while True:
@@ -161,7 +160,7 @@ class _CodexAppServer:
             params = msg.get("params") or {}
             if "id" in msg and method:
                 if params.get("threadId") == thread_id and params.get("turnId") == turn_id:
-                    await self.respond(msg["id"], await self._handle_request(method, params, ns))
+                    await self.respond(msg["id"], await self._handle_request(method, params, tools))
                 continue
             if params.get("threadId") not in (None, thread_id): continue
             if params.get("turnId") not in (None, turn_id): continue
@@ -219,8 +218,8 @@ class _CodexAppServer:
                 if turn.get("error"): raise RuntimeError(turn["error"])
                 break
 
-    async def _handle_request(self, method, params, ns):
-        if method == "item/tool/call": return await _call_tool(ns, params.get("tool"), params.get("arguments") or {})
+    async def _handle_request(self, method, params, tools):
+        if method == "item/tool/call": return await _call_tool(tools, params.get("tool"), params.get("arguments") or {})
         if method == "item/commandExecution/requestApproval": return dict(decision="accept")
         if method == "item/fileChange/requestApproval": return dict(decision="accept")
         if method == "item/permissions/requestApproval": return dict(permissions={}, scope="turn")
@@ -257,20 +256,20 @@ class CodexBackend(BaseBackend):
         client = get_codex_client()
         state = {}
         session_id = provider_session_id
+        tools = self.tools if tool_mode != "off" else None
         if session_id:
             try:
                 session_id = await client.resume_thread(session_id, sp=self.ctx.system_prompt, cwd=self.ctx.cwd)
                 state["provider_session_id"] = session_id
             except Exception: pass
         if not session_id:
-            dynamic_tools = self.tools.codex_dynamic_tools() if tool_mode != "off" else None
+            dynamic_tools = await self.tools.codex_dynamic_tools() if tool_mode != "off" else None
             session_id = await client.start_thread(model=model, sp=self.ctx.system_prompt, dynamic_tools=dynamic_tools, ephemeral=ephemeral, cwd=self.ctx.cwd)
             if seed.startup_events:
                 seed_prompt = seed_to_notebook_xml(seed) + "The XML above describes a notebook already loaded into the live IPython session. "
                 seed_prompt += "Treat it as prior session context for this thread. Reply with ok and nothing else."
-                async for _ in client.turn_stream(session_id, seed_prompt, ns=self.ns, think=think, cwd=self.ctx.cwd): pass
+                async for _ in client.turn_stream(session_id, seed_prompt, tools=tools, think=think, cwd=self.ctx.cwd): pass
             state["provider_session_id"] = session_id
 
-        ns = self.ns if tool_mode != "off" else {}
-        stream = client.turn_stream(session_id, prompt, ns=ns, think=think, cwd=self.ctx.cwd)
+        stream = client.turn_stream(session_id, prompt, tools=tools, think=think, cwd=self.ctx.cwd)
         return self.prepared_turn(stream, provider_session_id=session_id, state=state)

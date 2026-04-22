@@ -223,14 +223,17 @@ class CommonStreamFormatter:
 class BaseBackend:
     formatter_cls = CommonStreamFormatter
 
-    def __init__(self, shell=None, cwd=None, system_prompt="", plugin_dirs=None, cli_path=None):
+    def __init__(self, shell=None, cwd=None, system_prompt="", plugin_dirs=None, cli_path=None, tools=None):
         self.shell = shell
         self.ctx = BackendContext(cwd=str(Path(cwd or os.getcwd()).resolve()), system_prompt=system_prompt,
             plugin_dirs=tuple(str(Path(o).resolve()) for o in (plugin_dirs or [])), cli_path=cli_path)
-        self.tools = ToolRegistry(getattr(shell, "user_ns", {}))
+        if tools is not None: self.tools = tools
+        else:
+            reg = getattr(shell, "_ipyai_tool_registry", None)
+            self.tools = reg if reg is not None else ToolRegistry.from_ns(getattr(shell, "user_ns", {}))
 
     @property
-    def ns(self): return self.tools.ns
+    def ns(self): return getattr(self.tools, "ns", None)
 
     async def complete(self, prompt, *, model):
         turn = await self.prepare_turn(prompt=prompt, model=model, think=COMPLETION_THINK, provider_session_id=None, seed=ConversationSeed(),

@@ -2,7 +2,7 @@ import argparse, asyncio, inspect, json, os, shutil
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
-from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ResultMessage, StreamEvent, TextBlock
+from claude_agent_sdk import (AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ResultMessage, StreamEvent, TextBlock,
     ToolResultBlock, ToolUseBlock, UserMessage, create_sdk_mcp_server, tool)
 from toolslm.funccall import get_schema_nm
 

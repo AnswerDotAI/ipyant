@@ -1,4 +1,4 @@
-import argparse, ast, asyncio, atexit, json, os, re, signal, sys, uuid
+import asyncio, ast, atexit, json, os, re, signal, sqlite3, sys, uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +16,7 @@ from rich.markdown import Markdown, TableDataElement
 
 from .backend_common import CommonStreamFormatter, ConversationSeed, PromptTurn, StartupEvent, thinking_to_blockquote
 from .backends import BACKENDS, DEFAULT_BACKEND, backend_spec, normalize_backend_name
+from .tooling import LocalBridge, ToolRegistry
 
 
 FileProxy.isatty = lambda self: self.rich_proxied_file.isatty()
@@ -58,6 +59,8 @@ EXTENSION_ATTR = "_ipyai_extension"
 RESET_LINE_NS = "_ipyai_reset_line"
 PROMPTS_TABLE = "claude_prompts"
 PROMPTS_COLS = ["id", "session", "prompt", "full_prompt", "response", "history_line"]
+SESSIONS_TABLE = "sessions"
+HISTORY_TABLE = "history"
 _PROMPTS_SQL = f"""CREATE TABLE IF NOT EXISTS {PROMPTS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session INTEGER NOT NULL,
@@ -70,8 +73,8 @@ CONFIG_PATH = CONFIG_DIR/"config.json"
 SYSP_PATH = CONFIG_DIR/"sysp.txt"
 LOG_PATH = CONFIG_DIR/"exact-log.jsonl"
 
-__all__ = """IPyAIExtension LAST_PROMPT LAST_RESPONSE create_extension
-load_ipython_extension unload_ipython_extension prompt_from_lines transform_dots transform_prompt_mode
+__all__ = """IPyAIExtension LAST_PROMPT LAST_RESPONSE create_extension resume_session
+prompt_from_lines transform_dots transform_prompt_mode
 astream_to_stdout CONFIG_PATH SYSP_PATH LOG_PATH""".split()
 
 _prompt_template = "{context}<user-request>{prompt}</user-request>"
@@ -125,7 +128,7 @@ def _tag(name, content="", **attrs):
 
 
 def _is_ipyai_input(source):
-    src = source.lstrip()
+    src = (source or "").lstrip()
     return src.startswith(".") or src.startswith("%ipyai") or src.startswith("%%ipyai")
 
 
@@ -159,21 +162,30 @@ def _var_refs(prompt, hist, notes=None):
 _MISSING = object()
 
 
-def _eval_var(name, ns):
-    if "(" in name:
-        try: ast.parse(name, mode="eval")
-        except SyntaxError: return _MISSING
-        try: return eval(name, ns)
-        except Exception: return _MISSING
-    return ns.get(name, _MISSING)
+async def _eval_vars(names, bridge):
+    if not names: return {}
+    out = {}
+    for name in names:
+        try: val = await bridge.read_var(name)
+        except Exception: val = _MISSING
+        out[name] = _MISSING if val is None and name.isidentifier() and not await _probe_defined(bridge, name) else val
+    return out
 
 
-def _format_var_xml(names, ns):
+async def _probe_defined(bridge, name):
+    if not name.isidentifier(): return True
+    try:
+        exprs,_ = await bridge._exec("", expressions={"_r": f"{name!r} in globals()"})
+        return bool(exprs.get("_r"))
+    except Exception: return False
+
+
+def _format_var_xml(values):
     parts = []
-    for name in sorted(names):
-        value = _eval_var(name, ns)
-        if value is _MISSING: continue
-        parts.append(f'<variable name="{name}" type="{type(value).__name__}">{value}</variable>')
+    for name in sorted(values):
+        val = values[name]
+        if val is _MISSING or val is None: continue
+        parts.append(f'<variable name="{name}" type="{type(val).__name__}">{val}</variable>')
     return "".join(parts)
 
 
@@ -263,6 +275,19 @@ async def astream_to_stdout(stream, formatter_cls: Callable[..., CommonStreamFor
     return getattr(fmt, "final_text", written)
 
 
+@contextmanager
+def _suppress_output_history(shell):
+    "Prevent IPython's display_pub from recording the AI stream into output history."
+    pub = getattr(shell, "display_pub", None)
+    if pub is None or not hasattr(pub, "_is_publishing"):
+        yield
+        return
+    old = pub._is_publishing
+    pub._is_publishing = True
+    try: yield
+    finally: pub._is_publishing = old
+
+
 def _validate_level(name, value, default):
     value = (value or default).strip().lower()
     if value not in {"l", "m", "h"}: raise ValueError(f"{name} must be one of h/m/l, got {value!r}")
@@ -276,18 +301,6 @@ def _validate_bool(name, value, default):
     if value in {"1", "true", "yes", "on"}: return True
     if value in {"0", "false", "no", "off"}: return False
     raise ValueError(f"{name} must be a boolean, got {value!r}")
-
-
-@contextmanager
-def _suppress_output_history(shell):
-    pub = getattr(shell, "display_pub", None)
-    if pub is None or not hasattr(pub, "_is_publishing"):
-        yield
-        return
-    old = pub._is_publishing
-    pub._is_publishing = True
-    try: yield
-    finally: pub._is_publishing = old
 
 
 def _default_models():
@@ -306,23 +319,6 @@ def _ensure_config_dir(path=None):
     return path.parent
 
 
-def _migrate_config(data):
-    "Migrate flat model/completion_model/think config to per-backend models format."
-    if "models" in data: return data
-    models = _default_models()
-    old_model = data.pop("model", None)
-    old_completion = data.pop("completion_model", None)
-    old_think = data.pop("think", None)
-    old_backend = data.get("backend", DEFAULT_BACKEND)
-    if old_model or old_completion or old_think:
-        bk = normalize_backend_name(old_backend)
-        if old_model: models[bk]["model"] = old_model
-        if old_completion: models[bk]["completion_model"] = old_completion
-        if old_think: models[bk]["think"] = old_think
-    data["models"] = models
-    return data
-
-
 def load_config(path=None, backend_name=None):
     path = Path(path or CONFIG_PATH)
     _ensure_config_dir(path)
@@ -330,7 +326,6 @@ def load_config(path=None, backend_name=None):
     if path.exists():
         data = json.loads(path.read_text())
         if not isinstance(data, dict): raise ValueError(f"Invalid config format in {path}")
-        data = _migrate_config(data)
         if "models" in data:
             for bk,vals in data["models"].items():
                 if bk in cfg["models"]: cfg["models"][bk].update(vals)
@@ -348,25 +343,6 @@ def load_config(path=None, backend_name=None):
     cfg["prompt_mode"] = _validate_bool("prompt_mode", cfg["prompt_mode"], DEFAULT_PROMPT_MODE)
     cfg["_backend_name"] = backend_name
     return cfg
-
-
-def _ensure_default_user_tools(shell):
-    ns = getattr(shell, "user_ns", {})
-    try:
-        from safecmd import bash
-        ns.setdefault("bash", bash)
-    except Exception: pass
-    try:
-        from bgterm import close_bgterm, start_bgterm, write_stdin
-        ns.setdefault("start_bgterm", start_bgterm)
-        ns.setdefault("write_stdin", write_stdin)
-        ns.setdefault("close_bgterm", close_bgterm)
-    except Exception: pass
-    try:
-        from exhash import exhash_file, lnhashview_file
-        ns.setdefault("lnhashview_file", lnhashview_file)
-        ns.setdefault("exhash_file", exhash_file)
-    except Exception: pass
 
 
 def load_sysp(path=None):
@@ -455,33 +431,31 @@ def _session_remark(remark=None, **updates):
 
 def _update_session_remark(db, session_id, **updates):
     if db is None: return
-    row = db.execute("SELECT remark FROM sessions WHERE session=?", (session_id,)).fetchone()
+    row = db.execute(f"SELECT remark FROM {SESSIONS_TABLE} WHERE session=?", (session_id,)).fetchone()
     if not row: return
-    db.execute("UPDATE sessions SET remark=? WHERE session=?", (_session_remark(row[0], **updates), session_id))
+    db.execute(f"UPDATE {SESSIONS_TABLE} SET remark=? WHERE session=?", (_session_remark(row[0], **updates), session_id))
 
 
-def _ensure_ai_tables(db):
-    if db is None: return
+def _open_db(path):
+    "Open a client-side sqlite connection to the kernel's shared history.sqlite and ensure claude_prompts exists. The kernel's HistoryManager owns creation of `sessions` and `history`."
+    Path(str(path)).parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(str(path))
     with db:
         db.execute(_PROMPTS_SQL)
-        cols = [o[1] for o in db.execute(f"PRAGMA table_info({PROMPTS_TABLE})")]
-        if cols and cols != PROMPTS_COLS:
-            db.execute(f"DROP TABLE {PROMPTS_TABLE}")
-            db.execute(_PROMPTS_SQL)
         db.execute(f"CREATE INDEX IF NOT EXISTS idx_{PROMPTS_TABLE}_session_id ON {PROMPTS_TABLE} (session, id)")
+    return db
 
 
 _LIST_SQL = f"""SELECT s.session, s.start, s.end, s.num_cmds,
     CASE WHEN json_valid(s.remark) THEN json_extract(s.remark, '$.{_CWD_KEY}') END,
     (SELECT prompt FROM {PROMPTS_TABLE} WHERE session=s.session ORDER BY id DESC LIMIT 1)
-    FROM sessions s
+    FROM {SESSIONS_TABLE} s
     WHERE CASE WHEN json_valid(s.remark) THEN json_extract(s.remark, '$.{_CWD_KEY}') END{{w}}
       AND CASE WHEN json_valid(s.remark) THEN json_extract(s.remark, '$.{_BACKEND_KEY}') END=?
     ORDER BY s.session DESC LIMIT 20"""
 
 
 def _list_sessions(db, cwd, backend_name):
-    _ensure_ai_tables(db)
     rows = db.execute(_LIST_SQL.format(w="=?"), (cwd, backend_name)).fetchall()
     if not rows:
         repo = _git_repo_root(cwd)
@@ -501,22 +475,14 @@ def _pick_session(rows):
     return radiolist_dialog(title="Resume session", text="Select a session to resume:", values=values, default=values[0][0]).run()
 
 
-def resume_session(shell, session_id, backend_name=None):
-    hm = shell.history_manager
-    fresh_id = hm.session_number
-    row = hm.db.execute("SELECT session, remark FROM sessions WHERE session=?", (session_id,)).fetchone()
+def resume_session(db, session_id, backend_name=None):
+    "Validate that ipyai session `session_id` exists (and matches the requested backend); reopen it in the DB."
+    row = db.execute(f"SELECT session, remark FROM {SESSIONS_TABLE} WHERE session=?", (session_id,)).fetchone()
     if not row: raise ValueError(f"Session {session_id} not found")
-    if backend_name and _session_meta(row[1]).get(_BACKEND_KEY) != backend_name:
-        found = _session_meta(row[1]).get(_BACKEND_KEY) or "unknown"
-        raise ValueError(f"Session {session_id} uses backend {found!r}, not {backend_name!r}")
-    with hm.db:
-        hm.db.execute("DELETE FROM sessions WHERE session=?", (fresh_id,))
-        hm.db.execute("UPDATE sessions SET end=NULL WHERE session=?", (session_id,))
-    hm.session_number = session_id
-    max_line = hm.db.execute("SELECT MAX(line) FROM history WHERE session=?", (session_id,)).fetchone()[0]
-    shell.execution_count = (max_line or 0) + 1
-    hm.input_hist_parsed.extend([""] * (shell.execution_count - 1))
-    hm.input_hist_raw.extend([""] * (shell.execution_count - 1))
+    meta = _session_meta(row[1])
+    if backend_name and meta.get(_BACKEND_KEY) and meta.get(_BACKEND_KEY) != backend_name:
+        raise ValueError(f"Session {session_id} uses backend {meta.get(_BACKEND_KEY)!r}, not {backend_name!r}")
+    with db: db.execute(f"UPDATE {SESSIONS_TABLE} SET end=NULL WHERE session=?", (session_id,))
 
 
 @magics_class
@@ -534,7 +500,7 @@ class AIMagics(Magics):
 
 class IPyAIExtension:
     def __init__(self, shell, model=None, completion_model=None, think=None, code_theme=None, log_exact=None, system_prompt=None,
-        prompt_mode=None, backend_name=None, backend_factory=None):
+        prompt_mode=None, backend_name=None, backend_factory=None, bridge=None, session_number=None, db=None):
         self.shell,self.loaded = shell,False
         cfg = load_config(CONFIG_PATH, backend_name=backend_name)
         self.backend_name = cfg["_backend_name"]
@@ -548,7 +514,11 @@ class IPyAIExtension:
         self.log_exact = _validate_bool("log_exact", log_exact if log_exact is not None else cfg["log_exact"], DEFAULT_LOG_EXACT)
         self.system_prompt = system_prompt if system_prompt is not None else load_sysp(SYSP_PATH)
         self.plugin_dirs = _discover_plugin_dirs(os.getcwd())
-        _ensure_default_user_tools(shell)
+        self.bridge = bridge if bridge is not None else LocalBridge(getattr(shell, "user_ns", {}))
+        if db is None: raise ValueError("IPyAIExtension requires a sqlite db connection (shared with the kernel's HistoryManager)")
+        self.db = db if isinstance(db, sqlite3.Connection) else _open_db(db)
+        if session_number is None: raise ValueError("IPyAIExtension requires a session_number from the kernel's HistoryManager")
+        self._session_number = session_number
 
     @property
     def backend(self): return self.backend_name
@@ -557,29 +527,23 @@ class IPyAIExtension:
     def history_manager(self): return getattr(self.shell, "history_manager", None)
 
     @property
-    def session_number(self): return getattr(self.history_manager, "session_number", 0)
+    def session_number(self): return self._session_number
 
     @property
     def reset_line(self): return self.shell.user_ns.get(RESET_LINE_NS, 0)
 
-    @property
-    def db(self):
-        hm = self.history_manager
-        return None if hm is None else hm.db
-
     def make_backend(self, system_prompt=None):
         return self.backend_factory(shell=self.shell, cwd=os.getcwd(), system_prompt=self.system_prompt if system_prompt is None else system_prompt,
-            plugin_dirs=self.plugin_dirs)
+            plugin_dirs=self.plugin_dirs, tools=ToolRegistry(self.bridge))
 
-    def ensure_tables(self): _ensure_ai_tables(self.db)
+    @contextmanager
+    def _db(self):
+        with self.db: yield self.db
 
     def _ensure_session_row(self):
-        if self.db is None: return
-        with self.db: _update_session_remark(self.db, self.session_number, cwd=os.getcwd(), backend=self.backend_name)
+        with self._db() as db: _update_session_remark(db, self.session_number, cwd=os.getcwd(), backend=self.backend_name)
 
     def prompt_records(self, session=None):
-        if self.db is None: return []
-        self.ensure_tables()
         session = self.session_number if session is None else session
         cur = self.db.execute(f"SELECT id, prompt, full_prompt, response, history_line FROM {PROMPTS_TABLE} WHERE session=? ORDER BY id", (session,))
         return cur.fetchall()
@@ -597,7 +561,14 @@ class IPyAIExtension:
     def code_history(self, start, stop):
         hm = self.history_manager
         if hm is None or stop <= start: return []
-        return list(hm.get_range(session=0, start=start, stop=stop, raw=True, output=True))
+        buf = getattr(self.shell, "output_buffer", None) or {}
+        out = []
+        for sess,line,pair in hm.get_range(session=0, start=start, stop=stop, raw=True, output=True):
+            if isinstance(pair, (tuple, list)) and len(pair) == 2: src,outp = pair[0], pair[1]
+            else: src,outp = pair,None
+            if outp is None and line in buf: outp = buf[line]
+            out.append((sess, line, (src, outp)))
+        return out
 
     def full_history(self): return self.code_history(1, self.current_input_line()+1)
 
@@ -620,10 +591,8 @@ class IPyAIExtension:
         return [_note_str(src) for _,_,pair in self.code_history(start, stop) if (src := pair[0]) and _is_note(src)]
 
     def save_prompt(self, prompt, full_prompt, response, history_line):
-        if self.db is None: return
-        self.ensure_tables()
-        with self.db:
-            self.db.execute(f"INSERT INTO {PROMPTS_TABLE} (session, prompt, full_prompt, response, history_line) VALUES (?, ?, ?, ?, ?)",
+        with self._db() as db:
+            db.execute(f"INSERT INTO {PROMPTS_TABLE} (session, prompt, full_prompt, response, history_line) VALUES (?, ?, ?, ?, ?)",
                 (self.session_number, prompt, full_prompt, response, history_line))
 
     def startup_events(self):
@@ -681,32 +650,60 @@ class IPyAIExtension:
         with LOG_PATH.open("a") as f: f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def reset_session_history(self):
-        if self.db is None: return 0
-        self.ensure_tables()
-        with self.db:
-            cur = self.db.execute(f"DELETE FROM {PROMPTS_TABLE} WHERE session=?", (self.session_number,))
-            _update_session_remark(self.db, self.session_number, cwd=os.getcwd(), backend=self.backend_name, provider_session_id=None)
+        with self._db() as db:
+            cur = db.execute(f"DELETE FROM {PROMPTS_TABLE} WHERE session=?", (self.session_number,))
+            _update_session_remark(db, self.session_number, cwd=os.getcwd(), backend=self.backend_name, provider_session_id=None)
         self.shell.user_ns.pop(LAST_PROMPT, None)
         self.shell.user_ns.pop(LAST_RESPONSE, None)
         self.shell.user_ns[RESET_LINE_NS] = self.current_prompt_line()
         return cur.rowcount or 0
 
     def get_provider_session_id(self):
-        if self.db is None: return None
-        row = self.db.execute("SELECT remark FROM sessions WHERE session=?", (self.session_number,)).fetchone()
+        row = self.db.execute(f"SELECT remark FROM {SESSIONS_TABLE} WHERE session=?", (self.session_number,)).fetchone()
         if not row: return None
         meta = _session_meta(row[0])
         return meta.get(_PROVIDER_SESSION_KEY) if meta.get(_BACKEND_KEY) == self.backend_name else None
 
     def set_provider_session(self, session_id):
-        if self.db is None or not session_id: return
-        with self.db: _update_session_remark(self.db, self.session_number, cwd=os.getcwd(), backend=self.backend_name, provider_session_id=session_id)
+        if not session_id: return
+        with self._db() as db:
+            _update_session_remark(db, self.session_number, cwd=os.getcwd(), backend=self.backend_name, provider_session_id=session_id)
+
+    def _pt_cli(self): return getattr(self.shell, "pt_cli", None) or getattr(self.shell, "pt_app", None)
+
+    def _install_lexer(self):
+        "Swap the prompt_toolkit lexer to plain for AI-prompt lines; code lexer otherwise."
+        pt = self._pt_cli()
+        if pt is None: return
+        orig = getattr(pt, "lexer", None)
+        if orig is None: return
+        from prompt_toolkit.lexers import Lexer, SimpleLexer
+        plain = SimpleLexer()
+        ext = self
+
+        class _Dispatch(Lexer):
+            def lex_document(self, document):
+                text = document.text.lstrip()
+                if ext.prompt_mode and not text.startswith((";", "!", "%")): return plain.lex_document(document)
+                if text.startswith(".") or text.startswith("%%ipyai"): return plain.lex_document(document)
+                return orig.lex_document(document)
+
+        pt.lexer = _Dispatch()
+
+    def _refresh_prompt(self):
+        "Force pt_cli to redraw its prompt (prompt-mode toggle)."
+        pt = self._pt_cli()
+        if pt is None: return
+        app = getattr(pt, "app", None)
+        if app is not None:
+            try: app.invalidate()
+            except Exception: pass
 
     def _register_keybindings(self):
-        pt_app = getattr(self.shell, "pt_app", None)
-        if pt_app is None: return
-        auto_suggest = pt_app.auto_suggest
-        if auto_suggest:
+        pt = self._pt_cli()
+        if pt is None: return
+        auto_suggest = getattr(pt, "auto_suggest", None)
+        if auto_suggest is not None:
             auto_suggest._ai_full_text = None
             _orig_get = auto_suggest.get_suggestion
 
@@ -723,13 +720,13 @@ class IPyAIExtension:
 
         def _get_blocks(): return _extract_code_blocks(ns.get(LAST_RESPONSE, ""))
 
-        @pt_app.key_bindings.add("escape", "W")
+        @pt.key_bindings.add("escape", "W")
         def _paste_all(event):
             blocks = _get_blocks()
             if blocks: event.current_buffer.insert_text("\n".join(blocks))
 
         for i,ch in enumerate("!@#$%^&*(", 1):
-            @pt_app.key_bindings.add("escape", ch)
+            @pt.key_bindings.add("escape", ch)
             def _paste_nth(event, n=i):
                 blocks = _get_blocks()
                 if len(blocks) >= n: event.current_buffer.insert_text(blocks[n-1])
@@ -745,19 +742,19 @@ class IPyAIExtension:
             from prompt_toolkit.document import Document
             event.current_buffer.document = Document(blocks[cycle["idx"]])
 
-        @pt_app.key_bindings.add("escape", "s-up")
+        @pt.key_bindings.add("escape", "s-up")
         def _cycle_down(event): _cycle(event, 1)
 
-        @pt_app.key_bindings.add("escape", "s-down")
+        @pt.key_bindings.add("escape", "s-down")
         def _cycle_up(event): _cycle(event, -1)
 
-        @pt_app.key_bindings.add("escape", "up")
+        @pt.key_bindings.add("escape", "up")
         def _hist_back(event): event.current_buffer.history_backward()
 
-        @pt_app.key_bindings.add("escape", "down")
+        @pt.key_bindings.add("escape", "down")
         def _hist_fwd(event): event.current_buffer.history_forward()
 
-        @pt_app.key_bindings.add("escape", ".")
+        @pt.key_bindings.add("escape", ".")
         def _ai_suggest(event):
             buf,doc,app = event.current_buffer,event.current_buffer.document,event.app
             if not doc.text.strip(): return
@@ -767,18 +764,16 @@ class IPyAIExtension:
                     text = await self._ai_complete(doc)
                     if text and buf.document == doc:
                         from prompt_toolkit.auto_suggest import Suggestion
-                        if auto_suggest: auto_suggest._ai_full_text = doc.text + text
+                        if auto_suggest is not None: auto_suggest._ai_full_text = doc.text + text
                         buf.suggestion = Suggestion(text)
                         app.invalidate()
                 except Exception: pass
 
             app.create_background_task(_do_complete())
 
-        @pt_app.key_bindings.add("escape", "p")
+        @pt.key_bindings.add("escape", "p")
         def _toggle_prompt(event):
             self._toggle_prompt_mode()
-            from prompt_toolkit.formatted_text import PygmentsTokens
-            pt_app.message = PygmentsTokens(self.shell.prompts.in_prompt_tokens())
             event.app.invalidate()
 
     async def _ai_complete(self, document):
@@ -792,29 +787,12 @@ class IPyAIExtension:
         res = await self.make_backend(system_prompt=_COMPLETION_SP).complete("\n".join(parts), model=self.completion_model)
         return (res.content or "").strip()
 
-    def _patch_lexer(self):
-        from IPython.terminal.ptutils import IPythonPTLexer
-        from prompt_toolkit.lexers import SimpleLexer
-        plain = SimpleLexer()
-        orig = IPythonPTLexer.lex_document
-        ext = self
-
-        def _lex_document(self, document):
-            text = document.text.lstrip()
-            if ext.prompt_mode and not text.startswith((";", "!", "%")): return plain.lex_document(document)
-            if text.startswith(".") or text.startswith("%%ipyai"): return plain.lex_document(document)
-            return orig(self, document)
-
-        IPythonPTLexer.lex_document = _lex_document
-
     def load(self):
         if self.loaded: return self
-        self.ensure_tables()
         self._ensure_session_row()
         cts = self.shell.input_transformer_manager.cleanup_transforms
         if self.prompt_mode:
             if transform_prompt_mode not in cts: cts.insert(0, transform_prompt_mode)
-            self._swap_prompts()
         elif transform_dots not in cts:
             idx = 1 if cts and cts[0] is leading_empty_lines else 0
             cts.insert(idx, transform_dots)
@@ -823,7 +801,7 @@ class IPyAIExtension:
         self.shell.user_ns.setdefault(RESET_LINE_NS, 0)
         setattr(self.shell, EXTENSION_ATTR, self)
         self._register_keybindings()
-        self._patch_lexer()
+        self._install_lexer()
         self.loaded = True
         return self
 
@@ -854,20 +832,16 @@ class IPyAIExtension:
             if transform_dots not in cts:
                 idx = 1 if cts and cts[0] is leading_empty_lines else 0
                 cts.insert(idx, transform_dots)
-        self._swap_prompts()
-        print(f"Prompt mode {'ON' if self.prompt_mode else 'OFF'}")
+        self._invalidate_history_cache()
+        self._refresh_prompt()
 
-    def _swap_prompts(self):
-        from IPython.terminal.prompts import Prompts, Token
-        shell = self.shell
-        if self.prompt_mode:
-            if not hasattr(self, "_orig_prompts"): self._orig_prompts = shell.prompts
-
-            class PromptModePrompts(Prompts):
-                def in_prompt_tokens(self_p): return [(Token.Prompt, "Pr ["), (Token.PromptNum, str(shell.execution_count)), (Token.Prompt, "]: ")]
-
-            shell.prompts = PromptModePrompts(shell)
-        elif hasattr(self, "_orig_prompts"): shell.prompts = self._orig_prompts
+    def _invalidate_history_cache(self):
+        "Clear the History cache AND reset the Buffer's _working_lines (preserving current text) so the next up-arrow reloads from the new mode's query."
+        pt = self._pt_cli()
+        buf = getattr(pt, "default_buffer", None) if pt else None
+        hist = getattr(buf, "history", None)
+        if hist is not None: hist._loaded = False
+        if buf is not None: buf.reset(document=buf.document)
 
     def _show_help(self):
         cmds = [("(no args)", "Show current settings"), ("help", "Show this help"), ("model <name>", "Set model"),
@@ -927,10 +901,10 @@ class IPyAIExtension:
             notes += self.note_strings(prev_line+1, o["history_line"])
             prev_line = o["history_line"]
         notes += self.note_strings(self.last_prompt_line()+1, history_line)
-        ns = self.shell.user_ns
         var_names = _var_refs(prompt, records, notes=notes)
-        missing_vars = sorted(n for n in var_names if _eval_var(n, ns) is _MISSING)
-        var_xml = _format_var_xml(var_names, ns)
+        values = await _eval_vars(var_names, self.bridge)
+        missing_vars = sorted(n for n,v in values.items() if v is _MISSING)
+        var_xml = _format_var_xml(values)
         shell_cmds = _shell_refs(prompt, records, notes=notes)
         shell_xml = _run_shell_refs(shell_cmds)
         warnings = _tag("warnings", f"The following symbols were referenced but aren't defined in the interpreter: {', '.join(missing_vars)}") + "\n" if missing_vars else ""
@@ -942,19 +916,21 @@ class IPyAIExtension:
             provider_session_id=self.get_provider_session_id(), seed=self.conversation_seed(prompt_records=prompt_records))
         stream = turn.stream
         loop,task = asyncio.get_running_loop(),asyncio.current_task()
-        loop.add_signal_handler(signal.SIGINT, task.cancel)
+        try: loop.add_signal_handler(signal.SIGINT, task.cancel)
+        except Exception: pass
         try:
-            with _suppress_output_history(self.shell): text = await astream_to_stdout(stream, formatter_cls=backend.formatter_cls, code_theme=self.code_theme,
-                partial=partial)
+            with _suppress_output_history(self.shell):
+                text = await astream_to_stdout(stream, formatter_cls=backend.formatter_cls, code_theme=self.code_theme, partial=partial)
         except asyncio.CancelledError:
             text = "".join(partial) + "\n<system>user interrupted</system>"
             print("\nstopped")
         finally:
-            loop.remove_signal_handler(signal.SIGINT)
+            try: loop.remove_signal_handler(signal.SIGINT)
+            except Exception: pass
             await stream.aclose()
         self.shell.user_ns[LAST_RESPONSE] = text
         ng = getattr(self.shell, "_ipythonng_extension", None)
-        if ng: ng._pty_output = thinking_to_blockquote(text)
+        if ng is not None: ng._pty_output = thinking_to_blockquote(text)
         if session_id := await turn.wait_provider_session_id(): self.set_provider_session(session_id)
         self.log_exact_exchange(full_prompt, text)
         self.save_prompt(prompt, full_prompt, text, history_line)
@@ -968,21 +944,30 @@ def _resume_command(session_id, backend_name):
     return f"ipyai{backend_part} -r {session_id}"
 
 
-def create_extension(shell=None, resume=None, file=None, prompt_mode=False, backend=None, **kwargs):
+def create_extension(shell=None, resume=None, file=None, prompt_mode=False, backend=None, bridge=None,
+    db=None, session_number=None, **kwargs):
+    "Build/load the IPyAIExtension. `db` is the client-side sqlite connection to the kernel's shared history.sqlite; `session_number` is the kernel's HistoryManager.session_number."
     shell = shell or get_ipython()
     if shell is None: raise RuntimeError("No active IPython shell found")
     cfg = load_config(CONFIG_PATH, backend_name=backend)
     backend_name = cfg["_backend_name"]
-    _ensure_ai_tables(shell.history_manager.db)
+    db = db if isinstance(db, sqlite3.Connection) or db is None else _open_db(db)
     if resume is not None:
+        if db is None: raise ValueError("resume requires a db connection")
         if resume == -1:
-            rows = _list_sessions(shell.history_manager.db, os.getcwd(), backend_name)
-            if rows and (chosen := _pick_session(rows)): resume_session(shell, chosen, backend_name=backend_name)
+            rows = _list_sessions(db, os.getcwd(), backend_name)
+            if rows and (chosen := _pick_session(rows)):
+                resume_session(db, chosen, backend_name=backend_name)
+                session_number = chosen
             else: print("No sessions found for this directory.")
-        else: resume_session(shell, resume, backend_name=backend_name)
+        else:
+            resume_session(db, resume, backend_name=backend_name)
+            session_number = resume
     ext = getattr(shell, EXTENSION_ATTR, None)
     if ext is not None and ext.backend_name != backend_name: ext.unload()
-    if ext is None or ext.backend_name != backend_name: ext = IPyAIExtension(shell=shell, prompt_mode=prompt_mode, backend_name=backend_name, **kwargs)
+    if ext is None or ext.backend_name != backend_name:
+        ext = IPyAIExtension(shell=shell, prompt_mode=prompt_mode, backend_name=backend_name, bridge=bridge,
+            session_number=session_number, db=db, **kwargs)
     if not ext.loaded: ext.load()
     if file is not None:
         try:
@@ -991,31 +976,7 @@ def create_extension(shell=None, resume=None, file=None, prompt_mode=False, back
         except FileNotFoundError as e: print(str(e))
     ext._ensure_session_row()
     if not getattr(shell, "_ipyai_atexit", False):
-        sid = shell.history_manager.session_number
+        sid = ext.session_number
         atexit.register(lambda: print(f"\nTo resume: {_resume_command(sid, ext.backend_name)}"))
         shell._ipyai_atexit = True
     return ext
-
-
-_ng_parser = argparse.ArgumentParser(add_help=False)
-_ng_parser.add_argument("-b", type=str, default=None)
-_ng_parser.add_argument("-r", type=int, nargs="?", const=-1, default=None)
-_ng_parser.add_argument("-l", type=str, default=None)
-_ng_parser.add_argument("-p", action="store_true", default=False)
-
-
-def _parse_ng_flags():
-    raw = os.environ.pop("IPYTHONNG_FLAGS", "")
-    if not raw: return _ng_parser.parse_args([])
-    return _ng_parser.parse_args(raw.split())
-
-
-def load_ipython_extension(ipython):
-    flags = _parse_ng_flags()
-    return create_extension(ipython, resume=flags.r, file=flags.l, prompt_mode=flags.p, backend=flags.b)
-
-
-def unload_ipython_extension(ipython):
-    ext = getattr(ipython, EXTENSION_ATTR, None)
-    if ext is None: return
-    ext.unload()

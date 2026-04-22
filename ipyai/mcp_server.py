@@ -54,11 +54,11 @@ class ToolSocketServer:
     async def _dispatch(self, msg):
         mid,method,params = msg.get("id"), msg.get("method"), msg.get("params") or {}
         if method == "list_tools":
-            return dict(id=mid, result=[_tool_spec(s) for s in self.registry.openai_schemas()])
+            schemas = await self.registry.openai_schemas()
+            return dict(id=mid, result=[_tool_spec(s) for s in schemas])
         if method == "call_tool":
             try:
                 text = await self.registry.call_text(params["name"], params.get("args") or {})
                 return dict(id=mid, result=dict(content=[dict(type="text", text=text)], isError=False))
-            except Exception as e:
-                return dict(id=mid, result=dict(content=[dict(type="text", text=f"Error: {e}")], isError=True))
+            except Exception as e: return dict(id=mid, result=dict(content=[dict(type="text", text=f"Error: {e}")], isError=True))
         return dict(id=mid, error=dict(message=f"Unknown method: {method}"))

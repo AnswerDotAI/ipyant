@@ -3,8 +3,7 @@ import asyncio, json, os, sys
 
 
 class _SocketClient:
-    def __init__(self, reader, writer):
-        self.reader,self.writer,self.lock,self._id = reader,writer,asyncio.Lock(),0
+    def __init__(self, reader, writer): self.reader,self.writer,self.lock,self._id = reader,writer,asyncio.Lock(),0
 
     async def rpc(self, method, params=None):
         async with self.lock:
@@ -44,8 +43,7 @@ async def _main():
         content = [TextContent(type=o.get("type", "text"), text=o.get("text", "")) for o in (res.get("content") or [])]
         return CallToolResult(content=content, isError=bool(res.get("isError")))
 
-    async with stdio_server() as (rx, tx):
-        await server.run(rx, tx, server.create_initialization_options())
+    async with stdio_server() as (rx, tx): await server.run(rx, tx, server.create_initialization_options())
 
 
 def main(): asyncio.run(_main())

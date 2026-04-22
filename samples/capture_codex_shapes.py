@@ -13,10 +13,8 @@ async def main():
     thread_id = await client.start_thread(model="gpt-5.4-mini", ephemeral=True)
 
     raw_events = []
-    async for chunk in client.turn_stream(thread_id,
-        "Think and provide a really concise reference of how the SI units are built from first principles.",
-        think="h"):
-        raw_events.append(chunk)
+    async for chunk in client.turn_stream(thread_id, "Think and provide a really concise reference of how the SI units are built from first principles.",
+        think="h"): raw_events.append(chunk)
 
     path = OUT_DIR/"codex_text_stream.json"
     path.write_text(json.dumps(raw_events, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")

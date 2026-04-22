@@ -20,8 +20,10 @@ def test_session_belongs_to_us_matches_any_session_id(tmp_path):
 
 
 def test_session_belongs_to_us_empty_or_bad_file(tmp_path):
-    empty = tmp_path/"empty.jsonl"; empty.write_text("")
-    bad = tmp_path/"bad.jsonl"; bad.write_text("not json\n")
+    empty = tmp_path/"empty.jsonl"
+    empty.write_text("")
+    bad = tmp_path/"bad.jsonl"
+    bad.write_text("not json\n")
     assert cc._session_belongs_to_us(empty, {"abc"}) is False
     assert cc._session_belongs_to_us(bad, {"abc"}) is False
 

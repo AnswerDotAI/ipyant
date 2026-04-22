@@ -11,7 +11,7 @@ from ipyai.tooling import ToolRegistry
 async def _bridge_roundtrip(ns):
     from mcp.client.session import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
-    srv = await ToolSocketServer(ToolRegistry(ns)).start()
+    srv = await ToolSocketServer(ToolRegistry.from_ns(ns)).start()
     try:
         params = StdioServerParameters(command=shutil.which("ipyai-mcp-bridge"), args=[], env=dict(IPYAI_MCP_SOCK=srv.sock_path))
         async with stdio_client(params) as (rx,tx):

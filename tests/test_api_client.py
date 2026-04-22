@@ -7,7 +7,7 @@ from ipyai.api_client import AsyncStreamFormatter
 
 def _resp_with_tc(call_id="call_1", name="pyrun", arguments='{"code":"2+2"}'):
     msg = Message(role="assistant", content=None,
-        tool_calls=[{"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}])
+        tool_calls=[dict(id=call_id, type="function", function=dict(name=name, arguments=arguments))])
     return ModelResponse(choices=[Choices(message=msg, index=0, finish_reason="tool_calls")])
 
 

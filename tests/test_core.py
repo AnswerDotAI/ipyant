@@ -3,7 +3,7 @@ import json, os
 from IPython.core.inputtransformer2 import TransformerManager
 
 from ipyai.backends import BACKEND_CLAUDE_CLI, BACKEND_CODEX
-from ipyai.core import _ensure_default_user_tools, _list_sessions, prompt_from_lines, transform_dots
+from ipyai.core import SESSIONS_TABLE, _list_sessions, prompt_from_lines, transform_dots
 
 
 def test_prompt_from_lines_and_transform_dots():
@@ -20,22 +20,16 @@ def test_cleanup_transform_works_with_ipython_transformer():
     assert code == "get_ipython().run_cell_magic('ipyai', '', 'Ask a question\\nwith a newline\\n')\n"
 
 
-def test_list_sessions_filters_backend(shell):
-    db = shell.history_manager.db
-    with db:
-        db.execute("UPDATE sessions SET remark=? WHERE session=1", (json.dumps(dict(cwd=os.getcwd(), backend=BACKEND_CLAUDE_CLI)),))
-        db.execute("INSERT INTO sessions (session, start, end, num_cmds, remark) VALUES (2, CURRENT_TIMESTAMP, NULL, 0, ?)",
-            (json.dumps(dict(cwd=os.getcwd(), backend=BACKEND_CODEX)),))
-        db.execute("INSERT INTO sessions (session, start, end, num_cmds, remark) VALUES (3, CURRENT_TIMESTAMP, NULL, 0, ?)",
-            (json.dumps(dict(cwd="/tmp/elsewhere", backend=BACKEND_CLAUDE_CLI)),))
+def test_list_sessions_filters_backend(test_db):
+    cwd = os.getcwd()
+    with test_db:
+        test_db.execute(f"INSERT INTO {SESSIONS_TABLE} (session, remark) VALUES (?, ?)",
+            (2, json.dumps(dict(cwd=cwd, backend=BACKEND_CLAUDE_CLI))))
+        test_db.execute(f"INSERT INTO {SESSIONS_TABLE} (session, remark) VALUES (?, ?)",
+            (3, json.dumps(dict(cwd=cwd, backend=BACKEND_CODEX))))
+        test_db.execute(f"INSERT INTO {SESSIONS_TABLE} (session, remark) VALUES (?, ?)",
+            (4, json.dumps(dict(cwd="/tmp/elsewhere", backend=BACKEND_CLAUDE_CLI))))
 
-    rows = _list_sessions(db, os.getcwd(), BACKEND_CLAUDE_CLI)
+    rows = _list_sessions(test_db, cwd, BACKEND_CLAUDE_CLI)
 
-    assert [row[0] for row in rows] == [1]
-
-
-def test_default_user_tools_seed_new_tool_names(shell):
-    _ensure_default_user_tools(shell)
-    names = set(shell.user_ns)
-    assert {"bash", "start_bgterm", "write_stdin", "close_bgterm", "lnhashview_file", "exhash_file"} <= names
-    assert {"doc", "ex", "sed"}.isdisjoint(names)
+    assert [row[0] for row in rows] == [2]

@@ -118,15 +118,14 @@ class ClaudeBackend(BaseBackend):
     def _mcp_config(self, sock_path):
         return dict(mcpServers=dict(ipy=dict(command=self._bridge_path(), args=[], env=dict(IPYAI_MCP_SOCK=sock_path))))
 
-    def _cli_args(self, *, session_id, use_resume, model, think, allow_tools, sock_path):
+    def _cli_args(self, *, session_id, use_resume, model, think, allow_tools, sock_path, allowed_tool_names):
         args = [self._cli_path(), "-p", "--output-format", "stream-json", "--include-partial-messages", "--verbose",
-            "--no-session-persistence", "--system-prompt", self.ctx.system_prompt or "",
-            "--model", model, "--setting-sources", "user,project"]
+            "--no-session-persistence", "--system-prompt", self.ctx.system_prompt or "", "--model", model, "--setting-sources", "user,project"]
         args += ["--resume", session_id] if use_resume else ["--session-id", session_id]
         if (e := effort_level(think)): args += ["--effort", e]
         for d in self.ctx.plugin_dirs: args += ["--plugin-dir", d]
         if allow_tools:
-            allowed = [*BUILTIN_TOOLS, *self.tools.claude_allowed_tool_names()]
+            allowed = [*BUILTIN_TOOLS, *allowed_tool_names]
             args += ["--tools", ",".join(allowed), "--allowed-tools", *allowed]
             if sock_path: args += ["--mcp-config", json.dumps(self._mcp_config(sock_path))]
         else: args += ["--tools", ""]
@@ -141,14 +140,14 @@ class ClaudeBackend(BaseBackend):
         if turns:
             info = write_synthetic_session(self.ctx.cwd, turns)
             session_id,use_resume = info["session_id"], True
-        else:
-            session_id,use_resume = str(uuid.uuid4()), False
+        else: session_id,use_resume = str(uuid.uuid4()), False
         state["provider_session_id"] = session_id
         our_ids = {session_id}
         allow_tools = tool_mode != "off"
         sock_server = None
-        if allow_tools and self.tools.names():
-            sock_server = await ToolSocketServer(self.tools).start()
+        tool_names = await self.tools.names() if allow_tools else []
+        allowed_tool_names = await self.tools.claude_allowed_tool_names() if allow_tools else []
+        if allow_tools and tool_names: sock_server = await ToolSocketServer(self.tools).start()
         sock_path = sock_server.sock_path if sock_server else ""
 
         async def _stream():
@@ -163,10 +162,9 @@ class ClaudeBackend(BaseBackend):
 
             try:
                 args = self._cli_args(session_id=session_id, use_resume=use_resume, model=model, think=think,
-                    allow_tools=allow_tools, sock_path=sock_path)
-                proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                    cwd=self.ctx.cwd, start_new_session=True)
+                    allow_tools=allow_tools, sock_path=sock_path, allowed_tool_names=allowed_tool_names)
+                proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE, cwd=self.ctx.cwd, start_new_session=True)
                 stderr_task = asyncio.create_task(_drain_stderr(proc.stderr))
                 try:
                     proc.stdin.write(prompt.encode())

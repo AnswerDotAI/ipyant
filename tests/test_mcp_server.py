@@ -1,7 +1,5 @@
 import asyncio, json
 
-import pytest
-
 from safepyrun import RunPython
 
 from ipyai.mcp_server import ToolSocketServer
@@ -21,7 +19,7 @@ async def _rpc(sock_path, method, params=None):
 
 
 async def _with_server(ns, fn):
-    srv = await ToolSocketServer(ToolRegistry(ns)).start()
+    srv = await ToolSocketServer(ToolRegistry.from_ns(ns)).start()
     try: return await fn(srv.sock_path)
     finally: await srv.stop()
 

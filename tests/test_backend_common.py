@@ -3,17 +3,17 @@ from ipyai.core import IPyAIExtension, LAST_RESPONSE
 from ipyai.tooling import ToolRegistry
 
 
-def test_tool_registry_exposes_provider_shapes(shell):
+async def test_tool_registry_exposes_provider_shapes(shell):
     def pyrun(code: str):
         "Execute code"
         return code
 
     shell.user_ns["pyrun"] = pyrun
-    reg = ToolRegistry(shell.user_ns)
+    reg = ToolRegistry.from_ns(shell.user_ns)
 
-    assert reg.names() == ["pyrun"]
-    assert reg.claude_allowed_tool_names() == ["mcp__ipy__pyrun"]
-    tool = reg.codex_dynamic_tools()[0]
+    assert await reg.names() == ["pyrun"]
+    assert await reg.claude_allowed_tool_names() == ["mcp__ipy__pyrun"]
+    tool = (await reg.codex_dynamic_tools())[0]
     assert tool["name"] == "pyrun"
     assert tool["description"] == "Execute code"
     assert tool["inputSchema"]["type"] == "object"
@@ -21,8 +21,8 @@ def test_tool_registry_exposes_provider_shapes(shell):
     assert tool["inputSchema"]["properties"]["code"]["type"] == "string"
 
 
-def test_extension_conversation_seed_is_typed(shell):
-    ext = IPyAIExtension(shell=shell)
+def test_extension_conversation_seed_is_typed(shell, test_db):
+    ext = IPyAIExtension(shell=shell, db=test_db, session_number=1)
     shell.history_manager.add(1, "x = 1")
     ext.save_prompt("what", "<user-request>what</user-request>", "answer", 1)
 
@@ -41,7 +41,6 @@ class DummyBackend(BaseBackend):
 
     async def prepare_turn(self, **kwargs):
         self.calls.append(kwargs)
-        if setter := kwargs.get("session_setter"): setter("sess_late")
         async def _stream(): yield "hello"
 
         turn = self.prepared_turn(_stream())
@@ -75,9 +74,9 @@ async def test_prepared_turn_exposes_late_provider_session_id(shell):
     assert await turn.wait_provider_session_id() == "sess_late"
 
 
-async def test_core_run_prompt_passes_conversation_seed(shell, monkeypatch):
+async def test_core_run_prompt_passes_conversation_seed(shell, test_db, monkeypatch):
     backend = DummyBackend(shell=shell)
-    ext = IPyAIExtension(shell=shell, backend_factory=lambda **kwargs: backend)
+    ext = IPyAIExtension(shell=shell, backend_factory=lambda **kwargs: backend, db=test_db, session_number=1)
     ext.load()
     shell.history_manager.add(1, "x = 1")
     shell.execution_count = 2

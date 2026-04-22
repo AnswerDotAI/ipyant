@@ -1,44 +1,77 @@
+"Shared tool registry + local namespace bridge. Kernel-backed bridge lives in kernel_bridge.py."
 import inspect, json
 
 from toolslm.funccall import get_schema_nm
 
-
-CUSTOM_TOOL_NAMES = ("pyrun", "bash", "start_bgterm", "write_stdin", "close_bgterm", "lnhashview_file", "exhash_file")
+from .kernel_bridge import CUSTOM_TOOL_NAMES
 
 
 def _result_text(res): return res if isinstance(res, str) else json.dumps(res, ensure_ascii=False, default=str)
 
 
-class ToolRegistry:
+class LocalBridge:
+    "Dict-backed bridge used for tests and in-process callers."
     def __init__(self, ns): self.ns = ns
 
-    def names(self): return [o for o in CUSTOM_TOOL_NAMES if callable(self.ns.get(o))]
+    async def available_names(self, force=False): return [o for o in CUSTOM_TOOL_NAMES if callable(self.ns.get(o))]
 
-    def openai_schemas(self):
-        res = []
-        for name in self.names():
-            try: res.append(dict(type="function", function=get_schema_nm(name, self.ns, pname="parameters")))
+    async def schemas(self):
+        out = []
+        for name in await self.available_names():
+            try: out.append(dict(type="function", function=get_schema_nm(name, self.ns, pname="parameters")))
             except Exception: continue
-        return res
+        return out
 
-    def codex_dynamic_tools(self):
+    async def call_tool(self, name, args=None):
+        fn = self.ns.get(name)
+        if not callable(fn): raise NameError(f"{name!r} is not defined in the active namespace")
+        res = fn(**(args or {}))
+        if inspect.isawaitable(res): res = await res
+        return _result_text(res)
+
+    async def read_var(self, expr):
+        import ast
+        try: tree = ast.parse(expr, mode="eval")
+        except SyntaxError: return self.ns.get(expr)
+        if isinstance(tree.body, ast.Name): return self.ns.get(expr)
+        try: return eval(expr, self.ns)
+        except Exception: return None
+
+    async def read_vars(self, names): return {n: await self.read_var(n) for n in names}
+
+
+class ToolRegistry:
+    "Uniform tool surface for AI backends; delegates to a bridge (LocalBridge or KernelBridge)."
+    def __init__(self, bridge):
+        self.bridge = bridge
+        self._names_cache = None
+        self._schemas_cache = None
+
+    @classmethod
+    def from_ns(cls, ns): return cls(LocalBridge(ns))
+
+    @property
+    def ns(self): return getattr(self.bridge, "ns", None)
+
+    async def names(self, force=False):
+        if self._names_cache is None or force: self._names_cache = await self.bridge.available_names(force=force)
+        return self._names_cache
+
+    async def openai_schemas(self):
+        if self._schemas_cache is None: self._schemas_cache = await self.bridge.schemas()
+        return self._schemas_cache
+
+    async def codex_dynamic_tools(self):
+        schemas = await self.openai_schemas()
         return [dict(name=o["function"]["name"], description=o["function"].get("description") or "",
-            inputSchema=o["function"].get("parameters") or dict(type="object")) for o in self.openai_schemas()]
+            inputSchema=o["function"].get("parameters") or dict(type="object")) for o in schemas]
 
-    def claude_allowed_tool_names(self, prefix="mcp__ipy__"): return [f"{prefix}{o}" for o in self.names()]
+    async def claude_allowed_tool_names(self, prefix="mcp__ipy__"):
+        names = await self.names()
+        return [f"{prefix}{o}" for o in names]
 
-    async def call_text(self, name, args=None): return await call_ns_tool(self.ns, name, args)
+    async def call_text(self, name, args=None):
+        res = await self.bridge.call_tool(name, args or {})
+        return _result_text(res)
 
-
-def available_tool_names(ns): return ToolRegistry(ns).names()
-
-
-def openai_tool_schemas(ns): return ToolRegistry(ns).openai_schemas()
-
-
-async def call_ns_tool(ns, name, args=None):
-    fn = ns.get(name)
-    if not callable(fn): raise NameError(f"{name!r} is not defined in the active IPython namespace")
-    res = fn(**(args or {}))
-    if inspect.isawaitable(res): res = await res
-    return _result_text(res)
+    def invalidate(self): self._names_cache = self._schemas_cache = None
