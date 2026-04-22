@@ -2,7 +2,7 @@ import json, os
 
 from IPython.core.inputtransformer2 import TransformerManager
 
-from ipyai.backends import BACKEND_CLAUDE_SDK, BACKEND_CODEX
+from ipyai.backends import BACKEND_CLAUDE_CLI, BACKEND_CODEX
 from ipyai.core import _ensure_default_user_tools, _list_sessions, prompt_from_lines, transform_dots
 
 
@@ -23,13 +23,13 @@ def test_cleanup_transform_works_with_ipython_transformer():
 def test_list_sessions_filters_backend(shell):
     db = shell.history_manager.db
     with db:
-        db.execute("UPDATE sessions SET remark=? WHERE session=1", (json.dumps(dict(cwd=os.getcwd(), backend=BACKEND_CLAUDE_SDK)),))
+        db.execute("UPDATE sessions SET remark=? WHERE session=1", (json.dumps(dict(cwd=os.getcwd(), backend=BACKEND_CLAUDE_CLI)),))
         db.execute("INSERT INTO sessions (session, start, end, num_cmds, remark) VALUES (2, CURRENT_TIMESTAMP, NULL, 0, ?)",
             (json.dumps(dict(cwd=os.getcwd(), backend=BACKEND_CODEX)),))
         db.execute("INSERT INTO sessions (session, start, end, num_cmds, remark) VALUES (3, CURRENT_TIMESTAMP, NULL, 0, ?)",
-            (json.dumps(dict(cwd="/tmp/elsewhere", backend=BACKEND_CLAUDE_SDK)),))
+            (json.dumps(dict(cwd="/tmp/elsewhere", backend=BACKEND_CLAUDE_CLI)),))
 
-    rows = _list_sessions(db, os.getcwd(), BACKEND_CLAUDE_SDK)
+    rows = _list_sessions(db, os.getcwd(), BACKEND_CLAUDE_CLI)
 
     assert [row[0] for row in rows] == [1]
 

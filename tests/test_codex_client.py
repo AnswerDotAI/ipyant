@@ -1,6 +1,7 @@
 import asyncio
 
 import ipyai.codex_client as cc
+from ipyai.backend_common import COMPLETION_THINK
 
 
 async def _aiter(*items):
@@ -55,7 +56,7 @@ async def test_complete_uses_toolless_ephemeral_turn(shell, monkeypatch):
 
     assert str(res) == "done"
     assert fake.started == [dict(model="gpt-5.4-mini", sp="system", dynamic_tools=None, ephemeral=True, cwd=backend.ctx.cwd)]
-    assert fake.turns == [(("thread_1", "hi"), dict(ns={}, think="l", cwd=backend.ctx.cwd))]
+    assert fake.turns == [(("thread_1", "hi"), dict(ns={}, think=COMPLETION_THINK, cwd=backend.ctx.cwd))]
 
 
 async def test_consume_turn_emits_tool_start_and_complete_events():

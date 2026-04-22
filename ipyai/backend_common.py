@@ -8,6 +8,8 @@ from .tooling import ToolRegistry
 _THINK_RE = re.compile(r"<thinking>\n.*?\n</thinking>\n*", flags=re.DOTALL)
 _TOOL_PREFIX_RE = re.compile(r"^mcp__\w+__")
 
+COMPLETION_THINK = "l"  # effort level for inline AI completions (Alt-.); intentionally fixed regardless of DEFAULT_THINK
+
 
 @dataclass(frozen=True)
 class BackendContext:
@@ -231,8 +233,8 @@ class BaseBackend:
     def ns(self): return self.tools.ns
 
     async def complete(self, prompt, *, model):
-        turn = await self.prepare_turn(prompt=prompt, model=model, think="l", provider_session_id=None, seed=ConversationSeed(), tool_mode="off",
-            ephemeral=True)
+        turn = await self.prepare_turn(prompt=prompt, model=model, think=COMPLETION_THINK, provider_session_id=None, seed=ConversationSeed(),
+            tool_mode="off", ephemeral=True)
         return TextResponse((await collect_text(turn.stream)).strip())
 
     def prepared_turn(self, stream, provider_session_id=None, state=None):

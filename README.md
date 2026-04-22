@@ -1,10 +1,11 @@
 # ipyai
 
-`ipyai` is a terminal IPython extension with three AI backends:
+`ipyai` is a terminal IPython extension with four AI backends:
 
-- Claude Agent SDK (`claude-sdk`, default)
+- Codex API (`codex-api`, default) — hits the Codex `responses` endpoint directly using your `~/.codex/auth.json` token
+- Codex (`codex`) — local Codex app-server
+- Claude CLI (`claude-cli`) — drives the `claude -p` CLI, so usage counts against your Claude subscription rather than API billing
 - Claude API (`claude-api`)
-- Codex (`codex`)
 
 It is aimed at terminal IPython, not notebook frontends.
 
@@ -16,9 +17,10 @@ pip install -e ipyai
 
 `ipyai` uses `safepyrun` for live Python state. Backend requirements:
 
-- `claude-sdk`: local Claude Code / Agent SDK install and auth
-- `claude-api`: Anthropic API access
+- `codex-api`: local `codex` login so `~/.codex/auth.json` holds a valid access token
 - `codex`: local Codex app-server access
+- `claude-cli`: local `claude` CLI install and Claude Code login (subscription auth)
+- `claude-api`: Anthropic API access
 
 ## How to Use Prompts
 
@@ -48,8 +50,6 @@ You can also toggle prompt mode during a session with `%ipyai prompt`.
 
 ```bash
 ipyai
-ipyclaude
-ipycodex
 ```
 
 Flags:
@@ -58,13 +58,9 @@ Flags:
 ipyai -r                 # resume last session for the selected backend
 ipyai -r 43              # resume session 43
 ipyai -l session.ipynb   # load a saved notebook session at startup
-ipyai -b codex           # select backend: claude-sdk | claude-api | codex
+ipyai -b claude-cli      # select backend: codex-api | codex | claude-cli | claude-api
 ipyai -p                 # start in prompt mode
 ```
-
-`ipyclaude` is equivalent to `ipyai -b claude-api`.
-
-`ipycodex` is equivalent to `ipyai -b codex`.
 
 On exit, `ipyai` prints the session ID so you can resume later.
 
@@ -119,7 +115,7 @@ Prompt history is stored in SQLite; for compatibility, the table is currently na
 - `lnhashview_file`: view hash-addressed file lines for verified edits
 - `exhash_file`: apply verified hash-addressed edits to a file
 
-When using the Claude Agent SDK backend, it also enables these built-in Claude Code tools:
+When using the Claude CLI backend, it also enables these built-in Claude Code tools:
 
 - `Bash`
 - `Edit`
@@ -129,12 +125,14 @@ When using the Claude Agent SDK backend, it also enables these built-in Claude C
 - `WebSearch`
 - `Write`
 
+Custom tools are exposed to `claude -p` through an in-process unix-socket MCP server plus a small stdio bridge subprocess (`ipyai-mcp-bridge`), so the subscription-driven CLI can still call live-kernel tools like `pyrun`.
+
 The `ipyai` CLI loads `safepyrun` before `ipyai`, so `pyrun` is available by default in normal terminal use.
 `bash`, `start_bgterm`, `write_stdin`, `close_bgterm`, `lnhashview_file`, and `exhash_file` are seeded into the user namespace by `ipyai`.
 
 ## Skills
 
-When using the Claude Agent SDK backend, `ipyai` enables the built-in `Skill` tool and loads normal Claude user/project skills through the Agent SDK.
+When using the Claude CLI backend, `ipyai` enables the built-in `Skill` tool and passes `--setting-sources user,project` so `claude -p` loads your normal user- and project-level skills.
 
 ## Notebook Save/Load
 
@@ -151,8 +149,9 @@ When using the Claude Agent SDK backend, `ipyai` enables the built-in `Skill` to
 
 Backend restore is backend-specific:
 
-- `claude-sdk`: synthesizes a Claude transcript once, then resumes natively
+- `claude-cli`: synthesizes a fresh Claude transcript JSONL each turn and `claude -p --resume`s from it
 - `claude-api`: reuses the saved local prompt history directly on each turn
+- `codex-api`: reuses the saved local prompt history directly on each turn (same flat-history flow as `claude-api`)
 - `codex`: starts a fresh thread and sends the loaded notebook as XML context once
 
 ## Keyboard Shortcuts
@@ -176,9 +175,13 @@ Config lives under `XDG_CONFIG_HOME/ipyai/`:
 
 ```json
 {
-  "model": "sonnet",
-  "completion_model": "haiku",
-  "think": "l",
+  "backend": "codex-api",
+  "models": {
+    "claude-cli":  {"model": "sonnet",                   "completion_model": "haiku",                   "think": "m"},
+    "claude-api":  {"model": "claude-sonnet-4-6",        "completion_model": "claude-haiku-4-5-20251001","think": "m"},
+    "codex":       {"model": "gpt-5.4",                  "completion_model": "gpt-5.4-mini",            "think": "m"},
+    "codex-api":   {"model": "gpt-5.4",                  "completion_model": "gpt-5.4-mini",            "think": "m"}
+  },
   "code_theme": "monokai",
   "log_exact": false,
   "prompt_mode": false
