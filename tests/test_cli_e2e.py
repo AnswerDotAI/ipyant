@@ -63,3 +63,16 @@ def test_ipyai_backend_roundtrip(isolated_config):
         prompts = [r[0] for r in db.execute("SELECT prompt FROM claude_prompts ORDER BY id").fetchall()]
     assert any("widget" in p for p in prompts), f"first prompt not persisted to shared DB: {prompts}"
     assert any("sprocket" in p for p in prompts), f"second prompt not persisted to shared DB: {prompts}"
+
+
+def test_kernel_shuts_down_on_normal_exit(isolated_config):
+    "Running ipyai (without --existing, without --keep-alive) and exiting should terminate the kernel subprocess."
+    import time
+    cfg, ipy = isolated_config
+    (cfg/"ipyai"/"config.json").write_text('{"backend":"codex-api","prompt_mode":false}\n')
+
+    proc = _ipyai(";exit()\n", tmp_config=cfg, ipython_dir=ipy, timeout=60)
+    assert proc.returncode == 0
+    time.sleep(0.5)
+    ps = subprocess.run(["pgrep", "-f", f"ipykernel_launcher.*{ipy}"], capture_output=True, text=True)
+    assert not ps.stdout.strip(), f"kernel subprocess still alive after ipyai exit: pids={ps.stdout!r}"
