@@ -25,7 +25,7 @@ The test harness keeps setup small: `tools/test.sh` redirects `XDG_CONFIG_HOME` 
 - [ipyai/claude_client.py](ipyai/claude_client.py): Claude backend that spawns `claude -p` per turn, writes a synthetic session JSONL for context seeding, bridges custom tools through a unix socket + stdio MCP sidecar, and translates stream-json events into canonical backend events
 - [ipyai/mcp_server.py](ipyai/mcp_server.py): in-kernel unix socket server that exposes the live `ToolRegistry` (list_tools, call_tool) to the MCP bridge subprocess
 - [ipyai/mcp_bridge.py](ipyai/mcp_bridge.py): stdio MCP server subprocess entry point (`ipyai-mcp-bridge`) that `claude -p` spawns; forwards MCP tool calls over the unix socket
-- [ipyai/api_client.py](ipyai/api_client.py): Claude API backend via `lisette`; this is the explicit exception to the common canonical-event formatter path and still uses lisette's native formatter
+- [ipyai/api_client.py](ipyai/api_client.py): shared `_LisetteBackend` plus two backends on top of it — `ClaudeAPIBackend` (Anthropic via `lisette`) and `CodexAPIBackend` (Codex `responses` endpoint via `lisette.CodexChat`); this is the explicit exception to the common canonical-event formatter path and still uses lisette's native formatter
 - [ipyai/codex_client.py](ipyai/codex_client.py): Codex app-server backend, thread/session orchestration, and app-server event translation into canonical backend events
 - [ipyai/tooling.py](ipyai/tooling.py): shared custom `ToolRegistry`, schema generation, and local tool calling helpers
 - [ipyai/cli.py](ipyai/cli.py): `ipyai` console entry point
@@ -34,6 +34,7 @@ The test harness keeps setup small: `tools/test.sh` redirects `XDG_CONFIG_HOME` 
 - [tests/test_backend_claude_cli.py](tests/test_backend_claude_cli.py): Claude CLI end-to-end test
 - [tests/test_backend_claude_api.py](tests/test_backend_claude_api.py): Claude API end-to-end test
 - [tests/test_backend_codex.py](tests/test_backend_codex.py): Codex end-to-end test
+- [tests/test_backend_codex_api.py](tests/test_backend_codex_api.py): Codex API end-to-end test
 - [tests/test_mcp_server.py](tests/test_mcp_server.py): unit tests for the in-kernel tool socket server
 - [tests/test_mcp_bridge.py](tests/test_mcp_bridge.py): end-to-end test that spawns `ipyai-mcp-bridge` and exercises it over real MCP stdio
 - [tests/test_core.py](tests/test_core.py): small local guardrail tests for transforms and backend session filtering
@@ -55,7 +56,7 @@ The test harness keeps setup small: `tools/test.sh` redirects `XDG_CONFIG_HOME` 
    - `core.py` first builds a typed `ConversationSeed`
    - each backend then `prepare_turn(...)`s using that seed
    - Claude CLI writes a synthetic session JSONL per turn, spawns `claude -p --resume`, and starts a unix-socket MCP bridge for custom tools
-   - Claude API rebuilds flat history from the typed seed
+   - Claude API and Codex API both rebuild flat history from the typed seed through the shared `_LisetteBackend`
    - Codex resumes or bootstraps an app-server thread from the typed seed
 5. `astream_to_stdout()` renders the response through Rich in TTY mode and stores the final transcript text locally.
 
@@ -65,7 +66,7 @@ Completion policy is shared in `BaseBackend.complete()`:
 - `provider_session_id=None`
 - `tool_mode="off"`
 - `ephemeral=True`
-- `think="l"`
+- `think=COMPLETION_THINK` (fixed low effort for inline completions, independent of `DEFAULT_THINK`)
 
 Backends can still override `complete()` if a provider genuinely requires it, but the default path is now the contract.
 
@@ -84,7 +85,7 @@ There are two layers of state:
 If prompt history exists locally but `provider_session_id` is missing, provider bootstrap is backend-specific:
 
 - Claude CLI always writes a fresh synthetic transcript JSONL per turn and resumes from it, then deletes the file afterward (`--no-session-persistence` keeps claude from writing anything further)
-- Claude API uses the typed flat-history seed directly
+- Claude API and Codex API use the typed flat-history seed directly
 - Codex starts a new thread and sends the typed notebook-XML seed once
 
 Notebook save/load is explicit only:
@@ -108,7 +109,7 @@ The custom tool story is intentionally small:
 Provider-specific tool exposure now fans out from the shared `ToolRegistry`:
 
 - Claude CLI: unix-socket MCP bridge (`ipyai-mcp-bridge`) exposes the registry to `claude -p` via `--mcp-config`; allowed tool names use the `mcp__ipy__...` prefix
-- Claude API: OpenAI-style function schemas
+- Claude API and Codex API: OpenAI-style function schemas through `lisette`
 - Codex: app-server `dynamicTools`
 
 The `ipyai` CLI loads `safepyrun` before `ipyai`, so normal terminal sessions get `pyrun` automatically. `ipyai` seeds the other custom tools into `shell.user_ns` directly.

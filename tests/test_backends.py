@@ -2,7 +2,7 @@ import json, re
 
 from safepyrun import RunPython
 
-from ipyai.backends import BACKEND_CLAUDE_API, BACKEND_CLAUDE_CLI
+from ipyai.backends import BACKEND_CLAUDE_API, BACKEND_CLAUDE_CLI, BACKEND_CODEX_API
 from ipyai.core import IPyAIExtension, LAST_RESPONSE
 
 
@@ -24,7 +24,7 @@ async def _run_once(shell_cls, tmp_path, backend_name, model):
     assert re.search(r"\bwalnut\b", first)
     remark = json.loads(shell.history_manager.db.execute("SELECT remark FROM sessions WHERE session=1").fetchone()[0])
     assert remark["backend"] == backend_name
-    if backend_name != BACKEND_CLAUDE_API: assert remark.get("provider_session_id")
+    if backend_name not in (BACKEND_CLAUDE_API, BACKEND_CODEX_API): assert remark.get("provider_session_id")
 
     path,_,_ = ext.save_notebook(tmp_path/"session")
 

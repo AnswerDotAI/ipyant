@@ -28,7 +28,7 @@ def _tde_on_text(self, context, text):
 
 TableDataElement.on_text = _tde_on_text
 
-DEFAULT_THINK = "l"
+DEFAULT_THINK = "m"
 DEFAULT_CODE_THEME = "monokai"
 DEFAULT_LOG_EXACT = False
 DEFAULT_PROMPT_MODE = False

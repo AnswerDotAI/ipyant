@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [{name = "Jeremy Howard", email = "info@answer.ai"}]
-dependencies = ["fastcore>=1.12.31", "ipython>=9", "rich", "mistletoe", "ipythonng", "mcp", "safepyrun", "lisette>=0.0.47",
+dependencies = ["fastcore>=1.12.31", "ipython>=9", "rich", "mistletoe", "ipythonng", "mcp", "safepyrun", "lisette>=0.1.20",
     "safecmd", "pyskills", "toolslm"]
 
 [project.scripts]
@@ -32,7 +32,7 @@ include = ["ipyai*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-filterwarnings = ["ignore::DeprecationWarning:pty"]
+filterwarnings = ["ignore::DeprecationWarning:pty", "ignore:Pydantic serializer warnings:UserWarning"]
 addopts = "-n 4 --dist loadfile"
 
 [tool.fastship]

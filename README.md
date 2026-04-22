@@ -1,8 +1,9 @@
 # ipyai
 
-`ipyai` is a terminal IPython extension with three AI backends:
+`ipyai` is a terminal IPython extension with four AI backends:
 
-- Codex (`codex`, default)
+- Codex API (`codex-api`, default) — hits the Codex `responses` endpoint directly using your `~/.codex/auth.json` token
+- Codex (`codex`) — local Codex app-server
 - Claude CLI (`claude-cli`) — drives the `claude -p` CLI, so usage counts against your Claude subscription rather than API billing
 - Claude API (`claude-api`)
 
@@ -16,9 +17,10 @@ pip install -e ipyai
 
 `ipyai` uses `safepyrun` for live Python state. Backend requirements:
 
+- `codex-api`: local `codex` login so `~/.codex/auth.json` holds a valid access token
+- `codex`: local Codex app-server access
 - `claude-cli`: local `claude` CLI install and Claude Code login (subscription auth)
 - `claude-api`: Anthropic API access
-- `codex`: local Codex app-server access
 
 ## How to Use Prompts
 
@@ -56,7 +58,7 @@ Flags:
 ipyai -r                 # resume last session for the selected backend
 ipyai -r 43              # resume session 43
 ipyai -l session.ipynb   # load a saved notebook session at startup
-ipyai -b claude-cli      # select backend: codex | claude-cli | claude-api
+ipyai -b claude-cli      # select backend: codex-api | codex | claude-cli | claude-api
 ipyai -p                 # start in prompt mode
 ```
 
@@ -149,6 +151,7 @@ Backend restore is backend-specific:
 
 - `claude-cli`: synthesizes a fresh Claude transcript JSONL each turn and `claude -p --resume`s from it
 - `claude-api`: reuses the saved local prompt history directly on each turn
+- `codex-api`: reuses the saved local prompt history directly on each turn (same flat-history flow as `claude-api`)
 - `codex`: starts a fresh thread and sends the loaded notebook as XML context once
 
 ## Keyboard Shortcuts
@@ -172,11 +175,12 @@ Config lives under `XDG_CONFIG_HOME/ipyai/`:
 
 ```json
 {
-  "backend": "codex",
+  "backend": "codex-api",
   "models": {
-    "claude-cli":  {"model": "sonnet",                   "completion_model": "haiku",                   "think": "l"},
-    "claude-api":  {"model": "claude-sonnet-4-6",        "completion_model": "claude-haiku-4-5-20251001","think": "l"},
-    "codex":       {"model": "gpt-5.4",                  "completion_model": "gpt-5.4-mini",            "think": "l"}
+    "claude-cli":  {"model": "sonnet",                   "completion_model": "haiku",                   "think": "m"},
+    "claude-api":  {"model": "claude-sonnet-4-6",        "completion_model": "claude-haiku-4-5-20251001","think": "m"},
+    "codex":       {"model": "gpt-5.4",                  "completion_model": "gpt-5.4-mini",            "think": "m"},
+    "codex-api":   {"model": "gpt-5.4",                  "completion_model": "gpt-5.4-mini",            "think": "m"}
   },
   "code_theme": "monokai",
   "log_exact": false,

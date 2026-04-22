@@ -1,4 +1,4 @@
-from ipyai.backend_common import BaseBackend, ConversationSeed
+from ipyai.backend_common import BaseBackend, COMPLETION_THINK, ConversationSeed
 from ipyai.core import IPyAIExtension, LAST_RESPONSE
 from ipyai.tooling import ToolRegistry
 
@@ -58,7 +58,7 @@ async def test_base_backend_complete_enforces_tool_off_ephemeral_policy(shell):
     call = backend.calls[0]
     assert call["prompt"] == "hi"
     assert call["model"] == "demo"
-    assert call["think"] == "l"
+    assert call["think"] == COMPLETION_THINK
     assert call["provider_session_id"] is None
     assert call["seed"] == ConversationSeed()
     assert call["tool_mode"] == "off"
