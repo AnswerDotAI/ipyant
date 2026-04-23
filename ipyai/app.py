@@ -2,8 +2,9 @@
 import asyncio, os, signal, sys
 
 from jupyter_client.asynchronous.client import AsyncKernelClient
+from jupyter_client.manager import KernelManager
 from jupyter_console.app import ZMQTerminalIPythonApp, aliases as _JC_ALIASES, flags as _JC_FLAGS
-from traitlets import Bool, Dict, Int, Unicode
+from traitlets import Bool, Dict, Int, Type, Unicode
 
 from .backends import DEFAULT_BACKEND
 from .kernel_bridge import CUSTOM_TOOL_NAMES, KernelBridge
@@ -46,11 +47,21 @@ def _open_async_client(connection_file):
     return client
 
 
+class IPyAIKernelManager(KernelManager):
+    "KernelManager that disables frozen modules so debugpy doesn't warn and breakpoints work."
+    def format_kernel_cmd(self, extra_arguments=None):
+        cmd = super().format_kernel_cmd(extra_arguments)
+        if cmd and "-Xfrozen_modules=off" not in cmd: cmd = [cmd[0], "-Xfrozen_modules=off", *cmd[1:]]
+        return cmd
+
+
 class IPyAIApp(ZMQTerminalIPythonApp):
     name = "ipyai"
     classes = ZMQTerminalIPythonApp.classes + [IPyAIShell]
     description = "Terminal IPython with AI backends, driving a Jupyter kernel via ZMQ."
     examples = _HELP_EPILOG
+
+    kernel_manager_class = Type(IPyAIKernelManager, config=True, help="Kernel manager that injects -Xfrozen_modules=off")
 
     backend = Unicode(DEFAULT_BACKEND, config=True, help="AI backend name")
     resume_session = Int(0, config=True, help="Resume the given ipyai session id (0 = none)")
@@ -68,6 +79,11 @@ class IPyAIApp(ZMQTerminalIPythonApp):
         if argv is None: argv = sys.argv[1:]
         argv = _preprocess_argv(argv)
         super().initialize(argv=argv)
+
+    def init_banner(self):
+        "Suppress the Python/IPython banner when attaching — user already knows what they connected to."
+        if self.existing: return
+        super().init_banner()
 
     def build_kernel_argv(self, argv=None):
         "Force-enable the kernel's HistoryManager so we have a real sqlite DB to share; users with HistoryManager.enabled=False in their IPython config still get ipyai's history features."
@@ -117,9 +133,10 @@ class IPyAIApp(ZMQTerminalIPythonApp):
         from .core import create_extension, _open_db
         resume = -1 if self.resume_pick else (self.resume_session or None)
         db = _open_db(self._db_path)
+        existing = self.connection_file if self.existing else None
         ext = create_extension(self.shell, resume=resume, file=self.load_notebook_path or None,
             prompt_mode=self.prompt_mode, backend=self.backend, bridge=self._bridge,
-            db=db, session_number=self._session_number)
+            db=db, session_number=self._session_number, existing=existing)
         self.shell._ipyai_extension = ext
 
     def _install_history_adapter(self):

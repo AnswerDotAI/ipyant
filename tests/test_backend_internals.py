@@ -1,12 +1,13 @@
 "Fast backend-internal unit tests: api_client formatter overrides, Claude CLI backend internals, Codex backend internals, MCP socket server."
 import asyncio, json
 
+from lisette.core import FullResponse, fmt2hist, tool_dtls_tag
 from litellm.types.utils import Choices, Message, ModelResponse
 from safepyrun import RunPython
 
 import ipyai.claude_client as claude
 import ipyai.codex_client as codex
-from ipyai.api_client import AsyncStreamFormatter
+from ipyai.api_client import AsyncStreamFormatter, _BridgeNS
 from ipyai.backend_common import COMPLETION_THINK
 from ipyai.mcp_server import ToolSocketServer
 from ipyai.tooling import ToolRegistry
@@ -31,22 +32,63 @@ async def _run_api(items):
     return fmt, out
 
 
-def test_api_tool_start_marker_suppressed():
+def test_api_tool_start_marker_suppressed_in_display_and_outp():
+    "ModelResponse with tool_calls captures tcs but emits no `⏳` chunk and adds nothing to outp."
     fmt,out = asyncio.run(_run_api([_resp_with_tc()]))
     assert out == [""]
     assert "⏳" not in fmt.outp
+    assert "⏳" not in fmt.display_text
     assert "call_1" in fmt.tcs
 
 
-def test_api_tool_result_rendered_as_compact_line():
-    resp = _resp_with_tc(call_id="call_1", name="pyrun", arguments='{"code":"2+2"}')
-    tool_msg = {"tool_call_id": "call_1", "content": "4"}
+def test_api_full_tool_result_preserved_in_outp_compact_in_display():
+    "Tool result must live in full inside outp/final_text (for replay) while terminal display sees only the compact one-liner."
+    long = "x" * 5000
+    resp = _resp_with_tc(call_id="call_1", name="pyrun", arguments='{"code":"big"}')
+    tool_msg = {"tool_call_id": "call_1", "content": FullResponse(long)}
     fmt,out = asyncio.run(_run_api([resp, tool_msg]))
     joined = "".join(out)
-    assert "🔧 pyrun(code='2+2') => 4" in joined
-    assert "<details>" not in joined
-    assert "<summary>" not in joined
-    assert "```json" not in joined
+
+    assert long in fmt.outp, "full tool result must live in outp for replay"
+    assert fmt.final_text == fmt.outp
+    assert tool_dtls_tag in fmt.outp, "outp must use lisette's <details> block format so fmt2hist can round-trip"
+
+    assert "🔧 pyrun(code='big')" in joined, f"display must show compact one-liner: {joined!r}"
+    assert long not in joined, "display must NOT include the full tool result"
+    assert long not in fmt.display_text
+
+
+def test_api_outp_round_trips_via_fmt2hist_with_full_tool_content():
+    "Replaying outp through lisette's fmt2hist must yield a real tool message whose content is the FULL original payload."
+    long = "y" * 3000
+    resp = _resp_with_tc(call_id="call_2", name="bash", arguments='{"cmd":"ls"}')
+    tool_msg = {"tool_call_id": "call_2", "content": FullResponse(long)}
+    fmt,_ = asyncio.run(_run_api([resp, tool_msg]))
+
+    msgs = fmt2hist(fmt.outp)
+    tool_results = [m for m in msgs if isinstance(m, dict) and m.get("role") == "tool"]
+    assert tool_results, f"fmt2hist should yield a tool result message: {msgs}"
+    assert tool_results[0]["content"] == long, "replayed tool content must be full, not truncated"
+
+
+def test_bridge_ns_does_not_wrap_plain_str_results():
+    "BridgeNS must not force-wrap tool results; truncation should use lisette's per-tool opt-in."
+    ns = {"pyrun": lambda code: code}
+    reg = ToolRegistry.from_ns(ns)
+    bns = _BridgeNS(reg)
+    caller = bns.get("pyrun")
+    res = asyncio.run(caller(code="z" * 5000))
+    assert type(res) is str, f"plain-str tool return must stay plain str, got {type(res).__name__}"
+
+
+def test_bridge_ns_preserves_full_response_from_tool():
+    "A tool that opts into no-truncation by returning FullResponse must have that type preserved end-to-end."
+    ns = {"notebook_xml": lambda: FullResponse("<ipython-notebook>...</ipython-notebook>")}
+    reg = ToolRegistry.from_ns(ns)
+    bns = _BridgeNS(reg)
+    caller = bns.get("notebook_xml")
+    res = asyncio.run(caller())
+    assert isinstance(res, FullResponse), f"FullResponse tool return must survive the bridge, got {type(res).__name__}"
 
 
 # ---- claude_client (jsonl cleanup predicates + formatter) ----

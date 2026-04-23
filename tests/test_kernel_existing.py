@@ -1,10 +1,11 @@
 "Separate kernel process: attach via --existing-style connection-file; verify pre-attach code is history-readable, post-attach iopub is captureable, and detaching does not shut the kernel down."
-import asyncio
+import asyncio, sqlite3
 
 from jupyter_client.asynchronous.client import AsyncKernelClient
 from jupyter_client.manager import KernelManager
 
 from ipyai.kernel_bridge import CUSTOM_TOOL_NAMES, KernelBridge
+from ipyai.shell import IPyAIHistory
 
 
 _BOOTSTRAP_EXTS = ("from IPython import get_ipython\n"
@@ -76,3 +77,4 @@ def test_attach_existing_kernel_without_shutdown():
         km.shutdown_kernel(now=False)
         try: loop.close()
         except Exception: pass
+

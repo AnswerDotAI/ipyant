@@ -90,3 +90,4 @@ async def test_core_run_prompt_passes_conversation_seed(shell, test_db, monkeypa
     assert isinstance(seed, ConversationSeed)
     assert seed.startup_events[0].kind == "code"
     assert shell.user_ns[LAST_RESPONSE] == "hello"
+    assert shell.execution_count == 3, f"execution_count should advance after a prompt (was 2): {shell.execution_count}"

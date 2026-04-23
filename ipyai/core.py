@@ -934,18 +934,20 @@ class IPyAIExtension:
         if session_id := await turn.wait_provider_session_id(): self.set_provider_session(session_id)
         self.log_exact_exchange(full_prompt, text)
         self.save_prompt(prompt, full_prompt, text, history_line)
+        self._advance_execution_count()
         return None
 
 
-def _resume_command(session_id, backend_name):
+def _resume_command(session_id, backend_name, existing=None):
     cfg = load_config(CONFIG_PATH)
     default = cfg["_backend_name"]
     backend_part = f" -b {backend_name}" if backend_name != default else ""
-    return f"ipyai{backend_part} -r {session_id}"
+    tail = f"--existing={existing}" if existing else f"-r {session_id}"
+    return f"ipyai{backend_part} {tail}"
 
 
 def create_extension(shell=None, resume=None, file=None, prompt_mode=False, backend=None, bridge=None,
-    db=None, session_number=None, **kwargs):
+    db=None, session_number=None, existing=None, **kwargs):
     "Build/load the IPyAIExtension. `db` is the client-side sqlite connection to the kernel's shared history.sqlite; `session_number` is the kernel's HistoryManager.session_number."
     shell = shell or get_ipython()
     if shell is None: raise RuntimeError("No active IPython shell found")
@@ -977,6 +979,6 @@ def create_extension(shell=None, resume=None, file=None, prompt_mode=False, back
     ext._ensure_session_row()
     if not getattr(shell, "_ipyai_atexit", False):
         sid = ext.session_number
-        atexit.register(lambda: print(f"\nTo resume: {_resume_command(sid, ext.backend_name)}"))
+        atexit.register(lambda: print(f"\nTo resume: {_resume_command(sid, ext.backend_name, existing=existing)}"))
         shell._ipyai_atexit = True
     return ext

@@ -3,11 +3,13 @@ import ast, asyncio, json
 from queue import Empty
 
 
-CUSTOM_TOOL_NAMES = ("pyrun", "bash", "start_bgterm", "write_stdin", "close_bgterm", "lnhashview_file", "exhash_file")
+CUSTOM_TOOL_NAMES = ("pyrun", "bash", "start_bgterm", "write_stdin", "close_bgterm", "lnhashview_file", "exhash_file", "list_pyskills")
 _INJECT_IMPORTS = dict(bash="from safecmd import bash", start_bgterm="from bgterm import start_bgterm",
     write_stdin="from bgterm import write_stdin", close_bgterm="from bgterm import close_bgterm",
-    lnhashview_file="from exhash import lnhashview_file", exhash_file="from exhash import exhash_file")
+    lnhashview_file="from exhash import lnhashview_file", exhash_file="from exhash import exhash_file",
+    list_pyskills="from pyskills import list_pyskills")
 _EXEC_TIMEOUT = 20
+_TOOL_TIMEOUT = 600
 
 
 def _literal(text):
@@ -54,11 +56,11 @@ class KernelBridge:
         self._schemas = None
         self._names = None
 
-    async def _exec(self, code, *, expressions=None, capture_stream=False):
+    async def _exec(self, code, *, expressions=None, capture_stream=False, timeout=_EXEC_TIMEOUT):
         msg_id = self.client.execute(code, silent=True, store_history=False, user_expressions=expressions or {})
         stream = [] if capture_stream else None
-        iop = asyncio.create_task(_drain_iopub_until_idle(self.client, msg_id, stream))
-        reply = await _get_shell_reply(self.client, msg_id)
+        iop = asyncio.create_task(_drain_iopub_until_idle(self.client, msg_id, stream, timeout=timeout))
+        reply = await _get_shell_reply(self.client, msg_id, timeout=timeout)
         try: await iop
         except Exception: iop.cancel()
         content = reply["content"]
@@ -105,13 +107,19 @@ class KernelBridge:
     async def call_tool(self, name, args=None):
         names = await self.available_names()
         if name not in names: raise NameError(f"{name!r} is not defined in the kernel namespace")
-        code = (f"_ipyai_args = {json.dumps(args or {})}\n"
-            f"_ipyai_fn = globals()[{name!r}]\n"
-            "_ipyai_r = _ipyai_fn(**_ipyai_args)\n"
-            "if hasattr(_ipyai_r, '__await__'): _ipyai_r = await _ipyai_r\n")
-        exprs,_ = await self._exec(code, expressions={"_r": "_ipyai_r"})
+        code = f"""_ipyai_args = {(args or {})!r}
+_ipyai_fn = globals()[{name!r}]
+_ipyai_r = _ipyai_fn(**_ipyai_args)
+if hasattr(_ipyai_r, '__await__'): _ipyai_r = await _ipyai_r
+"""
+        exprs,_ = await self._exec(code, expressions={"_r": "_ipyai_r",
+            "_full": "any(c.__name__=='FullResponse' for c in type(_ipyai_r).__mro__)"}, timeout=_TOOL_TIMEOUT)
         res = exprs.get("_r")
-        return res if isinstance(res, str) else json.dumps(res, ensure_ascii=False, default=str)
+        text = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False, default=str)
+        if exprs.get("_full"):
+            from lisette.core import FullResponse
+            return FullResponse(text)
+        return text
 
     async def read_var(self, name):
         "Return repr of a live value by expression (`name` may be `foo` or `foo.bar(...)`)."

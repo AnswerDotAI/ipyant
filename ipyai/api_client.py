@@ -1,13 +1,14 @@
 import json, warnings
 
 from litellm.types.utils import ModelResponse
-from lisette.core import AsyncChat as LisetteAsyncChat, AsyncStreamFormatter as LisetteAsyncStreamFormatter, CodexChat, contents
+from lisette.core import (AsyncChat as LisetteAsyncChat, AsyncStreamFormatter as LisetteAsyncStreamFormatter,
+    CodexChat, contents, mk_tr_details)
 
 from .backend_common import BaseBackend, ConversationSeed, compact_tool, seed_to_flat_history
 
 
 class _BridgeNS(dict):
-    "Dict-shaped proxy so lisette's ns-based tool-call path routes through the ToolRegistry bridge."
+    "Dict-shaped proxy so lisette's ns-based tool-call path routes through the ToolRegistry bridge. Pass-through — any `FullResponse` a tool returns survives, and plain-str results go through lisette's default truncation."
     def __init__(self, registry):
         super().__init__()
         self._reg = registry
@@ -29,9 +30,15 @@ warnings.filterwarnings("ignore", message="Pydantic serializer warnings", catego
 
 
 class AsyncStreamFormatter(LisetteAsyncStreamFormatter):
+    "Streams via lisette's formatter so `outp` keeps full lisette `<details>` tool blocks (round-trippable through `fmt2hist`), but emits a compact `🔧 ...` line per tool result for the live terminal display."
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.final_text = ""
+        self.display_text = ""
+
+    def _emit(self, text):
+        if text: self.display_text += text
+        return text or ""
 
     def format_item(self, o):
         if isinstance(o, ModelResponse):
@@ -39,17 +46,15 @@ class AsyncStreamFormatter(LisetteAsyncStreamFormatter):
                 self.tcs = {tc.id: tc for tc in tcs}
                 return ""
         if isinstance(o, dict) and "tool_call_id" in o:
-            if (tc := self.tcs.pop(o["tool_call_id"], None)) is not None:
+            tc = self.tcs.pop(o["tool_call_id"], None)
+            if tc is not None:
+                self.outp += mk_tr_details(o, tc, mx=self.mx)
+                self.final_text = self.outp
                 args = json.loads(tc.function.arguments or "{}")
-                text = compact_tool(tc.function.name, args, o.get("content") or "")
-                self.outp += text
-                return text
-        return super().format_item(o)
-
-    async def format_stream(self, stream):
-        async for chunk in super().format_stream(stream):
-            self.final_text = self.outp
-            yield chunk
+                return self._emit(compact_tool(tc.function.name, args, o.get("content") or ""))
+        res = super().format_item(o)
+        self.final_text = self.outp
+        return self._emit(res)
 
 
 class _LisetteBackend(BaseBackend):
