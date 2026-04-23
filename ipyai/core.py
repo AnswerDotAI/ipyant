@@ -14,7 +14,7 @@ from rich.file_proxy import FileProxy
 from rich.live import Live
 from rich.markdown import Markdown, TableDataElement
 
-from .backend_common import CommonStreamFormatter, ConversationSeed, PromptTurn, StartupEvent, thinking_to_blockquote
+from .backend_common import CommonStreamFormatter, ConversationSeed, PromptTurn, StartupEvent, print_unexpected_error, thinking_to_blockquote
 from .backends import BACKENDS, DEFAULT_BACKEND, backend_spec, normalize_backend_name
 from .tooling import LocalBridge, ToolRegistry
 
@@ -33,7 +33,7 @@ DEFAULT_THINK = "m"
 DEFAULT_CODE_THEME = "monokai"
 DEFAULT_LOG_EXACT = False
 DEFAULT_PROMPT_MODE = False
-DEFAULT_SYSTEM_PROMPT = """You are an AI assistant running inside terminal IPython through the ipyai extension.
+DEFAULT_SYSTEM_PROMPT = """You are an AI assistant running inside terminal IPython through ipyai.
 
 The user may give you:
 - a `<context>` block containing recent executed Python code, outputs, and notes
@@ -54,8 +54,8 @@ _COMPLETION_SP = "You are a code completion engine for IPython. Return only the 
 MAGIC_NAME = "ipyai"
 LAST_PROMPT = "_ai_last_prompt"
 LAST_RESPONSE = "_ai_last_response"
-EXTENSION_NS = "_ipyai"
-EXTENSION_ATTR = "_ipyai_extension"
+CONTROLLER_NS = "_ipyai"
+CONTROLLER_ATTR = "_ipyai_controller"
 RESET_LINE_NS = "_ipyai_reset_line"
 PROMPTS_TABLE = "claude_prompts"
 PROMPTS_COLS = ["id", "session", "prompt", "full_prompt", "response", "history_line"]
@@ -73,7 +73,7 @@ CONFIG_PATH = CONFIG_DIR/"config.json"
 SYSP_PATH = CONFIG_DIR/"sysp.txt"
 LOG_PATH = CONFIG_DIR/"exact-log.jsonl"
 
-__all__ = """IPyAIExtension LAST_PROMPT LAST_RESPONSE create_extension resume_session
+__all__ = """IPyAIController LAST_PROMPT LAST_RESPONSE create_controller resume_session
 prompt_from_lines transform_dots transform_prompt_mode
 astream_to_stdout CONFIG_PATH SYSP_PATH LOG_PATH""".split()
 
@@ -162,12 +162,19 @@ def _var_refs(prompt, hist, notes=None):
 _MISSING = object()
 
 
+def _is_missing_var_error(exc):
+    msg = str(exc)
+    return isinstance(exc, (NameError, KeyError)) or "not defined" in msg or "is not defined" in msg
+
+
 async def _eval_vars(names, bridge):
     if not names: return {}
     out = {}
     for name in names:
         try: val = await bridge.read_var(name)
-        except Exception: val = _MISSING
+        except Exception as e:
+            if not _is_missing_var_error(e): print_unexpected_error(f"Variable reference failed for {name!r}", e)
+            val = _MISSING
         out[name] = _MISSING if val is None and name.isidentifier() and not await _probe_defined(bridge, name) else val
     return out
 
@@ -177,7 +184,9 @@ async def _probe_defined(bridge, name):
     try:
         exprs,_ = await bridge._exec("", expressions={"_r": f"{name!r} in globals()"})
         return bool(exprs.get("_r"))
-    except Exception: return False
+    except Exception as e:
+        print_unexpected_error(f"Variable existence probe failed for {name!r}", e)
+        return False
 
 
 def _format_var_xml(values):
@@ -223,6 +232,11 @@ def _event_sort_key(o): return o.get("line", 0), 0 if o.get("kind") == "code" el
 
 
 def _display_text(text): return thinking_to_blockquote(text)
+
+
+def _try_invalidate(app, label="Prompt redraw failed"):
+    try: app.invalidate()
+    except Exception as e: print_unexpected_error(label, e)
 
 
 def _markdown_renderable(text, code_theme, markdown_cls=Markdown):
@@ -487,18 +501,18 @@ def resume_session(db, session_id, backend_name=None):
 
 @magics_class
 class AIMagics(Magics):
-    def __init__(self, shell, ext):
+    def __init__(self, shell, ctrl):
         super().__init__(shell)
-        self.ext = ext
+        self.ctrl = ctrl
 
     @line_magic(MAGIC_NAME)
-    def ipyai_line(self, line=""): return self.ext.handle_line(line)
+    def ipyai_line(self, line=""): return self.ctrl.handle_line(line)
 
     @cell_magic(MAGIC_NAME)
-    async def ipyai_cell(self, line="", cell=None): await self.ext.run_prompt(cell)
+    async def ipyai_cell(self, line="", cell=None): await self.ctrl.run_prompt(cell)
 
 
-class IPyAIExtension:
+class IPyAIController:
     def __init__(self, shell, model=None, completion_model=None, think=None, code_theme=None, log_exact=None, system_prompt=None,
         prompt_mode=None, backend_name=None, backend_factory=None, bridge=None, session_number=None, db=None):
         self.shell,self.loaded = shell,False
@@ -515,9 +529,9 @@ class IPyAIExtension:
         self.system_prompt = system_prompt if system_prompt is not None else load_sysp(SYSP_PATH)
         self.plugin_dirs = _discover_plugin_dirs(os.getcwd())
         self.bridge = bridge if bridge is not None else LocalBridge(getattr(shell, "user_ns", {}))
-        if db is None: raise ValueError("IPyAIExtension requires a sqlite db connection (shared with the kernel's HistoryManager)")
+        if db is None: raise ValueError("IPyAIController requires a sqlite db connection (shared with the kernel's HistoryManager)")
         self.db = db if isinstance(db, sqlite3.Connection) else _open_db(db)
-        if session_number is None: raise ValueError("IPyAIExtension requires a session_number from the kernel's HistoryManager")
+        if session_number is None: raise ValueError("IPyAIController requires a session_number from the kernel's HistoryManager")
         self._session_number = session_number
 
     @property
@@ -679,12 +693,12 @@ class IPyAIExtension:
         if orig is None: return
         from prompt_toolkit.lexers import Lexer, SimpleLexer
         plain = SimpleLexer()
-        ext = self
+        ctrl = self
 
         class _Dispatch(Lexer):
             def lex_document(self, document):
                 text = document.text.lstrip()
-                if ext.prompt_mode and not text.startswith((";", "!", "%")): return plain.lex_document(document)
+                if ctrl.prompt_mode and not text.startswith((";", "!", "%")): return plain.lex_document(document)
                 if text.startswith(".") or text.startswith("%%ipyai"): return plain.lex_document(document)
                 return orig.lex_document(document)
 
@@ -695,9 +709,7 @@ class IPyAIExtension:
         pt = self._pt_cli()
         if pt is None: return
         app = getattr(pt, "app", None)
-        if app is not None:
-            try: app.invalidate()
-            except Exception: pass
+        if app is not None: _try_invalidate(app)
 
     def _register_keybindings(self):
         pt = self._pt_cli()
@@ -767,7 +779,10 @@ class IPyAIExtension:
                         if auto_suggest is not None: auto_suggest._ai_full_text = doc.text + text
                         buf.suggestion = Suggestion(text)
                         app.invalidate()
-                except Exception: pass
+                except asyncio.CancelledError: raise
+                except Exception as e:
+                    print_unexpected_error("AI completion failed", e)
+                    _try_invalidate(app)
 
             app.create_background_task(_do_complete())
 
@@ -797,9 +812,9 @@ class IPyAIExtension:
             idx = 1 if cts and cts[0] is leading_empty_lines else 0
             cts.insert(idx, transform_dots)
         self.shell.register_magics(AIMagics(self.shell, self))
-        self.shell.user_ns[EXTENSION_NS] = self
+        self.shell.user_ns[CONTROLLER_NS] = self
         self.shell.user_ns.setdefault(RESET_LINE_NS, 0)
-        setattr(self.shell, EXTENSION_ATTR, self)
+        setattr(self.shell, CONTROLLER_ATTR, self)
         self._register_keybindings()
         self._install_lexer()
         self.loaded = True
@@ -810,8 +825,8 @@ class IPyAIExtension:
         cts = self.shell.input_transformer_manager.cleanup_transforms
         if transform_dots in cts: cts.remove(transform_dots)
         if transform_prompt_mode in cts: cts.remove(transform_prompt_mode)
-        if self.shell.user_ns.get(EXTENSION_NS) is self: self.shell.user_ns.pop(EXTENSION_NS, None)
-        if getattr(self.shell, EXTENSION_ATTR, None) is self: delattr(self.shell, EXTENSION_ATTR)
+        if self.shell.user_ns.get(CONTROLLER_NS) is self: self.shell.user_ns.pop(CONTROLLER_NS, None)
+        if getattr(self.shell, CONTROLLER_ATTR, None) is self: delattr(self.shell, CONTROLLER_ATTR)
         self.loaded = False
         return self
 
@@ -912,22 +927,31 @@ class IPyAIExtension:
         self.shell.user_ns[LAST_PROMPT] = prompt
         backend = self.make_backend()
         partial = []
-        turn = await backend.prepare_turn(prompt=full_prompt, model=self.model, think=self.think,
-            provider_session_id=self.get_provider_session_id(), seed=self.conversation_seed(prompt_records=prompt_records))
-        stream = turn.stream
+        stream = turn = None
         loop,task = asyncio.get_running_loop(),asyncio.current_task()
-        try: loop.add_signal_handler(signal.SIGINT, task.cancel)
-        except Exception: pass
+        signal_set = False
         try:
-            with _suppress_output_history(self.shell):
-                text = await astream_to_stdout(stream, formatter_cls=backend.formatter_cls, code_theme=self.code_theme, partial=partial)
-        except asyncio.CancelledError:
-            text = "".join(partial) + "\n<system>user interrupted</system>"
-            print("\nstopped")
-        finally:
-            try: loop.remove_signal_handler(signal.SIGINT)
-            except Exception: pass
-            await stream.aclose()
+            turn = await backend.prepare_turn(prompt=full_prompt, model=self.model, think=self.think,
+                provider_session_id=self.get_provider_session_id(), seed=self.conversation_seed(prompt_records=prompt_records))
+            stream = turn.stream
+            try:
+                loop.add_signal_handler(signal.SIGINT, task.cancel)
+                signal_set = True
+            except (NotImplementedError, RuntimeError): pass
+            try:
+                with _suppress_output_history(self.shell):
+                    text = await astream_to_stdout(stream, formatter_cls=backend.formatter_cls, code_theme=self.code_theme, partial=partial)
+            except asyncio.CancelledError:
+                text = "".join(partial) + "\n<system>user interrupted</system>"
+                print("\nstopped")
+            finally:
+                if signal_set:
+                    try: loop.remove_signal_handler(signal.SIGINT)
+                    except Exception as e: print_unexpected_error("Failed to restore SIGINT handler", e)
+                if stream is not None: await stream.aclose()
+        except Exception as e:
+            print_unexpected_error("AI prompt failed", e)
+            raise
         self.shell.user_ns[LAST_RESPONSE] = text
         ng = getattr(self.shell, "_ipythonng_extension", None)
         if ng is not None: ng._pty_output = thinking_to_blockquote(text)
@@ -946,9 +970,9 @@ def _resume_command(session_id, backend_name, existing=None):
     return f"ipyai{backend_part} {tail}"
 
 
-def create_extension(shell=None, resume=None, file=None, prompt_mode=False, backend=None, bridge=None,
+def create_controller(shell=None, resume=None, file=None, prompt_mode=False, backend=None, bridge=None,
     db=None, session_number=None, existing=None, **kwargs):
-    "Build/load the IPyAIExtension. `db` is the client-side sqlite connection to the kernel's shared history.sqlite; `session_number` is the kernel's HistoryManager.session_number."
+    "Build/load the IPyAIController. `db` is the client-side sqlite connection to the kernel's shared history.sqlite; `session_number` is the kernel's HistoryManager.session_number."
     shell = shell or get_ipython()
     if shell is None: raise RuntimeError("No active IPython shell found")
     cfg = load_config(CONFIG_PATH, backend_name=backend)
@@ -965,20 +989,20 @@ def create_extension(shell=None, resume=None, file=None, prompt_mode=False, back
         else:
             resume_session(db, resume, backend_name=backend_name)
             session_number = resume
-    ext = getattr(shell, EXTENSION_ATTR, None)
-    if ext is not None and ext.backend_name != backend_name: ext.unload()
-    if ext is None or ext.backend_name != backend_name:
-        ext = IPyAIExtension(shell=shell, prompt_mode=prompt_mode, backend_name=backend_name, bridge=bridge,
+    ctrl = getattr(shell, CONTROLLER_ATTR, None)
+    if ctrl is not None and ctrl.backend_name != backend_name: ctrl.unload()
+    if ctrl is None or ctrl.backend_name != backend_name:
+        ctrl = IPyAIController(shell=shell, prompt_mode=prompt_mode, backend_name=backend_name, bridge=bridge,
             session_number=session_number, db=db, **kwargs)
-    if not ext.loaded: ext.load()
+    if not ctrl.loaded: ctrl.load()
     if file is not None:
         try:
-            path,ncode,nprompt = ext.load_notebook(file)
+            path,ncode,nprompt = ctrl.load_notebook(file)
             print(f"Loaded {ncode} code cells and {nprompt} prompts from {path}.")
         except FileNotFoundError as e: print(str(e))
-    ext._ensure_session_row()
+    ctrl._ensure_session_row()
     if not getattr(shell, "_ipyai_atexit", False):
-        sid = ext.session_number
-        atexit.register(lambda: print(f"\nTo resume: {_resume_command(sid, ext.backend_name, existing=existing)}"))
+        sid = ctrl.session_number
+        atexit.register(lambda: print(f"\nTo resume: {_resume_command(sid, ctrl.backend_name, existing=existing)}"))
         shell._ipyai_atexit = True
-    return ext
+    return ctrl

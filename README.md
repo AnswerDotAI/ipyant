@@ -1,6 +1,6 @@
 # ipyai
 
-`ipyai` is a terminal IPython extension with four AI backends:
+`ipyai` is a terminal IPython app with four AI backends:
 
 - Codex API (`codex-api`, default) — hits the Codex `responses` endpoint directly using your `~/.codex/auth.json` token
 - Codex (`codex`) — local Codex app-server
@@ -63,12 +63,6 @@ ipyai -p                 # start in prompt mode
 ```
 
 On exit, `ipyai` prints the session ID so you can resume later.
-
-## Load As Extension
-
-```python
-%load_ext ipyai
-```
 
 ## Usage
 

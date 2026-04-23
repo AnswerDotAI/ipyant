@@ -15,11 +15,11 @@ cd ipyai
 ./tools/test.sh
 ```
 
-The test harness keeps setup small: `tools/test.sh` redirects `XDG_CONFIG_HOME` to a repo-local temp dir so ipyai config writes stay out of a normal user config tree, then runs `pytest`. It does not redirect `CLAUDE_CONFIG_DIR`, because on macOS `claude -p` OAuth reads credentials from the login keychain keyed by the `userID` in `~/.claude.json`; redirecting the config dir breaks that lookup. Instead, `ClaudeBackend` sweeps any session jsonls it can identify as its own (or as known claude side-effect stubs) after each turn.
+The test harness keeps setup small: `tools/test.sh` redirects `XDG_CONFIG_HOME` to a repo-local temp dir so ipyai config writes stay out of a normal user config tree, then runs `pytest`. It does not redirect `CLAUDE_CONFIG_DIR`, because on macOS `claude -p` OAuth reads credentials from the login keychain keyed by the `userID` in `~/.claude.json`; redirecting the config dir breaks that lookup. Instead, `ClaudeBackend` sweeps any session jsonls it can identify as its own (or as known claude side-effect stubs) after each turn. The live Codex app-server test archives the threads it creates after the test so they do not show up in `codex resume`.
 
 ## File Map
 
-- [ipyai/core.py](ipyai/core.py): IPython extension logic, prompt transforms, SQLite bookkeeping, notebook save/load, prompt mode, keybindings, Rich streaming display, backend selection
+- [ipyai/core.py](ipyai/core.py): client-side `IPyAIController`, prompt transforms, SQLite bookkeeping, notebook save/load, prompt mode, keybindings, Rich streaming display, backend selection
 - [ipyai/backends.py](ipyai/backends.py): backend registry, canonical backend names, default models
 - [ipyai/backend_common.py](ipyai/backend_common.py): shared backend context/base classes, typed conversation seed types, common stream formatter, replay helpers, and shared tool/command display helpers
 - [ipyai/claude_client.py](ipyai/claude_client.py): Claude backend that spawns `claude -p` per turn, writes a synthetic session JSONL for context seeding, bridges custom tools through a unix socket + stdio MCP sidecar, and translates stream-json events into canonical backend events
@@ -43,14 +43,14 @@ The test harness keeps setup small: `tools/test.sh` redirects `XDG_CONFIG_HOME` 
 
 ## CLI Flag Plumbing
 
-`ipyai` uses `ipythonng.cli.parse_flags()` to split CLI args into ipyai flags and IPython args. `parse_flags` scans `sys.argv[1:]` for short flags (e.g. `-b`, `-r`, `-l`) that are not IPython's own short flags, collects them and their values into `IPYTHONNG_FLAGS` env var, and passes the rest through to IPython. When the ipyai extension loads, `_parse_ng_flags()` in `core.py` reads `IPYTHONNG_FLAGS` and parses it with argparse. This two-stage approach lets ipyai flags coexist with IPython flags on the same command line (e.g. `ipyai -b codex -r 5 --pdb`).
+`ipyai` is a `ZMQTerminalIPythonApp` subclass. `IPyAIApp` defines the ipyai-specific flags directly with traitlets (`-b`, `-r`, `-l`, `-p`, `--resume-pick`, `--keep-alive`) while still inheriting standard `jupyter_console` flags. Bare `-r` is preprocessed to `--resume-pick`; `-r N` resumes the concrete ipyai session id.
 
 ## Current Architecture
 
 ### Prompt Flow
 
 1. Input starting with `.` is rewritten into `%ipyai`.
-2. `IPyAIExtension.run_prompt()` reconstructs recent code/output/note context from IPython history.
+2. `IPyAIController.run_prompt()` reconstructs recent code/output/note context from IPython history.
 3. Variable refs like `$`name`` and shell refs like `!`cmd`` are injected above the prompt.
 4. The selected backend streams the turn:
    - `core.py` first builds a typed `ConversationSeed`

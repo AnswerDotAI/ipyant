@@ -110,7 +110,7 @@ class IPyAIApp(ZMQTerminalIPythonApp):
         self.shell.install_iopub_tee()
         hist_path, session_number = self._bootstrap_kernel()
         self._db_path, self._session_number = hist_path, session_number
-        self._load_ipyai_extension()
+        self._load_ipyai_controller()
         self._install_history_adapter()
 
     def _kernel_startup_code(self):
@@ -129,23 +129,21 @@ class IPyAIApp(ZMQTerminalIPythonApp):
             return await self._bridge.history_db_info()
         return asyncio.get_event_loop().run_until_complete(_go())
 
-    def _load_ipyai_extension(self):
-        from .core import create_extension, _open_db
+    def _load_ipyai_controller(self):
+        from .core import create_controller, _open_db
         resume = -1 if self.resume_pick else (self.resume_session or None)
         db = _open_db(self._db_path)
         existing = self.connection_file if self.existing else None
-        ext = create_extension(self.shell, resume=resume, file=self.load_notebook_path or None,
-            prompt_mode=self.prompt_mode, backend=self.backend, bridge=self._bridge,
-            db=db, session_number=self._session_number, existing=existing)
-        self.shell._ipyai_extension = ext
+        ctrl = create_controller(self.shell, resume=resume, file=self.load_notebook_path or None, prompt_mode=self.prompt_mode,
+            backend=self.backend, bridge=self._bridge, db=db, session_number=self._session_number, existing=existing)
+        self.shell._ipyai_controller = ctrl
 
     def _install_history_adapter(self):
         from .shell import IPyAIHistory
         pt = getattr(self.shell, "pt_cli", None)
         if pt is None: return
-        ext = self.shell._ipyai_extension
-        hist = IPyAIHistory(ext.db, int(self._session_number or 0),
-            mode_fn=lambda: "prompt" if ext.prompt_mode else "code")
+        ctrl = self.shell._ipyai_controller
+        hist = IPyAIHistory(ctrl.db, int(self._session_number or 0), mode_fn=lambda: "prompt" if ctrl.prompt_mode else "code")
         pt.default_buffer.history = hist
 
     def start(self):

@@ -1,4 +1,4 @@
-"End-to-end test that actually runs IPyAIApp.initialize() against a real spawned kernel. Stops short of starting the interactive prompt loop but verifies every wiring step (kernel spawn, async client, shell subclass, bootstrap inject, extension load)."
+"End-to-end test that actually runs IPyAIApp.initialize() against a real spawned kernel. Stops short of starting the interactive prompt loop but verifies every wiring step (kernel spawn, async client, shell subclass, bootstrap inject, controller attach)."
 
 
 def _patch_core(tmp_path, monkeypatch):
@@ -46,9 +46,9 @@ def test_app_initialize_wires_full_stack(tmp_path, monkeypatch):
         assert "-Xfrozen_modules=off" in cmd, f"kernel cmd must disable frozen modules for debugger: {cmd}"
         assert cmd.index("-Xfrozen_modules=off") < cmd.index("-m"), f"flag must precede -m: {cmd}"
 
-        ext = app.shell._ipyai_extension
-        assert ext is not None, "ipyai extension should have loaded"
-        assert ext.loaded
+        ctrl = app.shell._ipyai_controller
+        assert ctrl is not None, "ipyai controller should have loaded"
+        assert ctrl.loaded
 
         import asyncio
         async def _check():
@@ -63,4 +63,3 @@ def test_app_initialize_wires_full_stack(tmp_path, monkeypatch):
             if app.kernel_manager and app.kernel_manager.is_alive(): app.kernel_manager.shutdown_kernel(now=True)
         except Exception: pass
         IPyAIShell.clear_instance()
-

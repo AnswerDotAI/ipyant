@@ -1,4 +1,4 @@
-"IPyAIShell — ZMQTerminalInteractiveShell subclass. jupyter_console's shell does NOT inherit from InteractiveShell, so we synthesise the subset of the InteractiveShell API our extension needs (user_ns, input_transformer_manager, magics, display_pub, showtraceback) plus kittytgp image rendering, Rich markdown rendering, client-side iopub output buffer, prompt-mode prompt swap, and async run_cell / interact overrides that route ipyai magics through awaiting on the existing event loop."
+"IPyAIShell — ZMQTerminalInteractiveShell subclass. jupyter_console's shell does NOT inherit from InteractiveShell, so we synthesise the subset of the InteractiveShell API our controller needs (user_ns, input_transformer_manager, magics, display_pub, showtraceback) plus kittytgp image rendering, Rich markdown rendering, client-side iopub output buffer, prompt-mode prompt swap, and async run_cell / interact overrides that route ipyai magics through awaiting on the existing event loop."
 import base64, inspect, sys, traceback
 from collections import defaultdict
 
@@ -12,12 +12,11 @@ _CODE_SQL = ("SELECT source_raw AS text, session, line AS ord FROM history "
     "WHERE source_raw IS NOT NULL AND source_raw != '' ORDER BY session DESC, ord DESC LIMIT ?")
 _PROMPT_SQL = ("SELECT prompt AS text, session, history_line AS ord FROM claude_prompts "
     "WHERE prompt IS NOT NULL AND prompt != '' ORDER BY session DESC, ord DESC LIMIT ?")
-_BOTH_SQL = (
-    "SELECT text FROM ("
-    " SELECT source_raw AS text, session, line AS ord, 0 AS kind FROM history WHERE source_raw IS NOT NULL AND source_raw != ''"
-    " UNION ALL"
-    " SELECT prompt AS text, session, history_line AS ord, 1 AS kind FROM claude_prompts WHERE prompt IS NOT NULL AND prompt != ''"
-    ") ORDER BY session DESC, ord DESC, kind DESC LIMIT ?")
+_BOTH_SQL = """SELECT text FROM (
+ SELECT source_raw AS text, session, line AS ord, 0 AS kind FROM history WHERE source_raw IS NOT NULL AND source_raw != ''
+ UNION ALL
+ SELECT prompt AS text, session, history_line AS ord, 1 AS kind FROM claude_prompts WHERE prompt IS NOT NULL AND prompt != ''
+) ORDER BY session DESC, ord DESC, kind DESC LIMIT ?"""
 
 
 class IPyAIHistory(History):
@@ -66,7 +65,7 @@ class IPyAIShell(ZMQTerminalInteractiveShell):
 
     output_buffer = TAny()
     _ipyai_bridge = TAny(default_value=None, allow_none=True)
-    _ipyai_extension = TAny(default_value=None, allow_none=True)
+    _ipyai_controller = TAny(default_value=None, allow_none=True)
     user_ns = TAny()
     input_transformer_manager = TAny()
     display_pub = TAny()
@@ -194,17 +193,17 @@ class IPyAIShell(ZMQTerminalInteractiveShell):
 
     def run_line_magic(self, name, line):
         "Dispatched from transformed %ipyai line magics."
-        if name == "ipyai" and self._ipyai_extension is not None: return self._ipyai_extension.handle_line(line)
+        if name == "ipyai" and self._ipyai_controller is not None: return self._ipyai_controller.handle_line(line)
 
     async def run_cell_magic(self, name, line, cell):
         "Dispatched from transformed %%ipyai / `.` prompts."
-        if name == "ipyai" and self._ipyai_extension is not None: await self._ipyai_extension.run_prompt(cell)
+        if name == "ipyai" and self._ipyai_controller is not None: await self._ipyai_controller.run_prompt(cell)
 
     def showtraceback(self, *a, **kw): traceback.print_exc(file=sys.stderr)
 
     def get_prompt_tokens(self):
-        ext = getattr(self, "_ipyai_extension", None)
-        if ext is not None and getattr(ext, "prompt_mode", False):
+        ctrl = getattr(self, "_ipyai_controller", None)
+        if ctrl is not None and getattr(ctrl, "prompt_mode", False):
             from pygments.token import Token
             return [(Token.Prompt, "Pr ["), (Token.PromptNum, str(self.execution_count)), (Token.Prompt, "]: ")]
         return super().get_prompt_tokens()

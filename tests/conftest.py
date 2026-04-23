@@ -107,7 +107,7 @@ def shell(): return DummyShell()
 def test_db():
     "Isolated in-memory sqlite shaped like the shared history DB."
     db = _make_test_db()
-    # Pre-allocate session 1 so IPyAIExtension has something to reference.
+    # Pre-allocate session 1 so IPyAIController has something to reference.
     with db: db.execute("INSERT INTO sessions (session) VALUES (1)")
     yield db
     db.close()

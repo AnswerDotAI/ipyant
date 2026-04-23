@@ -1,4 +1,4 @@
-import ast, html, os, re
+import ast, html, os, re, sys, traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Literal
@@ -241,7 +241,11 @@ class BaseBackend:
     async def complete(self, prompt, *, model):
         turn = await self.prepare_turn(prompt=prompt, model=model, think=COMPLETION_THINK, provider_session_id=None, seed=ConversationSeed(),
             tool_mode="off", ephemeral=True)
-        return TextResponse((await collect_text(turn.stream)).strip())
+        fmt = self.formatter_cls()
+        if hasattr(fmt, "is_tty"): fmt.is_tty = True
+        try: return TextResponse((await collect_text(fmt.format_stream(turn.stream))).strip())
+        finally:
+            if aclose := getattr(turn.stream, "aclose", None): await aclose()
 
     def prepared_turn(self, stream, provider_session_id=None, state=None):
         state = {} if state is None else state
@@ -250,3 +254,9 @@ class BaseBackend:
 
 
 async def collect_text(stream): return "".join([o async for o in stream if isinstance(o, str)])
+
+
+def print_unexpected_error(label, exc, file=None):
+    file = file or sys.stderr
+    print(f"\n{label}: {exc}", file=file)
+    traceback.print_exception(type(exc), exc, exc.__traceback__, file=file)

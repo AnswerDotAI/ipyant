@@ -5,8 +5,7 @@ from lisette.core import FullResponse, fmt2hist, tool_dtls_tag
 from litellm.types.utils import Choices, Message, ModelResponse
 from safepyrun import RunPython
 
-import ipyai.claude_client as claude
-import ipyai.codex_client as codex
+import ipyai.claude_client as claude, ipyai.codex_client as codex
 from ipyai.api_client import AsyncStreamFormatter, _BridgeNS
 from ipyai.backend_common import COMPLETION_THINK, compact_tool, tool_call
 from ipyai.mcp_server import ToolSocketServer
@@ -229,6 +228,25 @@ async def test_codex_complete_uses_toolless_ephemeral_turn(shell, monkeypatch):
     assert str(res) == "done"
     assert fake.started == [dict(model="gpt-5.4-mini", sp="system", dynamic_tools=None, ephemeral=True, cwd=backend.ctx.cwd)]
     assert fake.turns == [(("thread_1", "hi"), dict(tools=None, think=COMPLETION_THINK, cwd=backend.ctx.cwd))]
+
+
+async def test_codex_archives_created_thread_ids():
+    client = codex._CodexAppServer()
+    seen = []
+
+    async def _ensure_initialized(): pass
+    async def _request(method, params):
+        seen.append((method, params))
+        return {}
+
+    client.ensure_initialized = _ensure_initialized
+    client.request = _request
+    client.created_thread_ids.add("thread_1")
+
+    await client.archive_thread("thread_1")
+
+    assert seen == [("thread/archive", dict(threadId="thread_1"))]
+    assert client.created_thread_ids == set()
 
 
 async def test_codex_consume_turn_emits_tool_start_and_complete_events():

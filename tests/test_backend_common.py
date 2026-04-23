@@ -1,5 +1,9 @@
+from types import SimpleNamespace
+
+import pytest
+
 from ipyai.backend_common import BaseBackend, COMPLETION_THINK, ConversationSeed
-from ipyai.core import IPyAIExtension, LAST_RESPONSE
+from ipyai.core import IPyAIController, LAST_RESPONSE, _eval_vars
 from ipyai.tooling import ToolRegistry
 
 
@@ -21,12 +25,12 @@ async def test_tool_registry_exposes_provider_shapes(shell):
     assert tool["inputSchema"]["properties"]["code"]["type"] == "string"
 
 
-def test_extension_conversation_seed_is_typed(shell, test_db):
-    ext = IPyAIExtension(shell=shell, db=test_db, session_number=1)
+def test_controller_conversation_seed_is_typed(shell, test_db):
+    ctrl = IPyAIController(shell=shell, db=test_db, session_number=1)
     shell.history_manager.add(1, "x = 1")
-    ext.save_prompt("what", "<user-request>what</user-request>", "answer", 1)
+    ctrl.save_prompt("what", "<user-request>what</user-request>", "answer", 1)
 
-    seed = ext.conversation_seed()
+    seed = ctrl.conversation_seed()
 
     assert seed.turns[0].prompt == "what"
     assert seed.turns[0].full_prompt == "<user-request>what</user-request>"
@@ -48,6 +52,38 @@ class DummyBackend(BaseBackend):
         return turn
 
 
+class ObjectFormatter:
+    async def format_stream(self, stream):
+        async for o in stream: yield o["text"] if isinstance(o, dict) else o
+
+
+class ObjectStreamBackend(DummyBackend):
+    formatter_cls = ObjectFormatter
+
+    async def prepare_turn(self, **kwargs):
+        self.calls.append(kwargs)
+        async def _stream(): yield dict(text="hello")
+        return self.prepared_turn(_stream())
+
+
+class FailingBackend(DummyBackend):
+    async def prepare_turn(self, **kwargs): raise RuntimeError("backend broke")
+
+
+class FakeKeyBindings:
+    def __init__(self): self.handlers = {}
+
+    def add(self, *keys):
+        def _decorator(fn):
+            self.handlers[keys] = fn
+            return fn
+        return _decorator
+
+
+class BrokenBridge:
+    async def read_var(self, name): raise TimeoutError("kernel shell reply timeout")
+
+
 async def test_base_backend_complete_enforces_tool_off_ephemeral_policy(shell):
     backend = DummyBackend(shell=shell)
 
@@ -64,6 +100,14 @@ async def test_base_backend_complete_enforces_tool_off_ephemeral_policy(shell):
     assert call["ephemeral"] is True
 
 
+async def test_base_backend_complete_formats_provider_objects(shell):
+    backend = ObjectStreamBackend(shell=shell)
+
+    res = await backend.complete("hi", model="demo")
+
+    assert str(res) == "hello"
+
+
 async def test_prepared_turn_exposes_late_provider_session_id(shell):
     backend = DummyBackend(shell=shell)
     turn = await backend.prepare_turn(prompt="hi", model="demo", think="l", provider_session_id=None, seed=ConversationSeed())
@@ -76,18 +120,76 @@ async def test_prepared_turn_exposes_late_provider_session_id(shell):
 
 async def test_core_run_prompt_passes_conversation_seed(shell, test_db, monkeypatch):
     backend = DummyBackend(shell=shell)
-    ext = IPyAIExtension(shell=shell, backend_factory=lambda **kwargs: backend, db=test_db, session_number=1)
-    ext.load()
+    ctrl = IPyAIController(shell=shell, backend_factory=lambda **kwargs: backend, db=test_db, session_number=1)
+    ctrl.load()
     shell.history_manager.add(1, "x = 1")
     shell.execution_count = 2
 
     async def _fake_astream_to_stdout(stream, **kwargs): return "".join([o async for o in stream])
     monkeypatch.setattr("ipyai.core.astream_to_stdout", _fake_astream_to_stdout)
 
-    await ext.run_prompt("hello")
+    await ctrl.run_prompt("hello")
 
     seed = backend.calls[0]["seed"]
     assert isinstance(seed, ConversationSeed)
     assert seed.startup_events[0].kind == "code"
     assert shell.user_ns[LAST_RESPONSE] == "hello"
     assert shell.execution_count == 3, f"execution_count should advance after a prompt (was 2): {shell.execution_count}"
+
+
+async def test_core_run_prompt_prints_unexpected_backend_errors(shell, test_db, capsys):
+    backend = FailingBackend(shell=shell)
+    ctrl = IPyAIController(shell=shell, backend_factory=lambda **kwargs: backend, db=test_db, session_number=1)
+    ctrl.load()
+
+    with pytest.raises(RuntimeError, match="backend broke"): await ctrl.run_prompt("hello")
+
+    err = capsys.readouterr().err
+    assert "AI prompt failed" in err
+    assert "RuntimeError: backend broke" in err
+
+
+async def test_ai_suggest_prints_background_errors(shell, test_db, capsys):
+    pt = SimpleNamespace(auto_suggest=None, key_bindings=FakeKeyBindings())
+    shell.pt_cli = pt
+    ctrl = IPyAIController(shell=shell, db=test_db, session_number=1)
+
+    async def _fail(doc): raise RuntimeError("completion broke")
+    ctrl._ai_complete = _fail
+    ctrl._register_keybindings()
+
+    tasks = []
+    app = SimpleNamespace(create_background_task=tasks.append, invalidate=lambda: None)
+    doc = SimpleNamespace(text="pri", text_before_cursor="pri", text_after_cursor="")
+    buf = SimpleNamespace(document=doc, suggestion=None)
+    event = SimpleNamespace(current_buffer=buf, app=app)
+
+    pt.key_bindings.handlers[("escape", ".")](event)
+    await tasks[0]
+
+    err = capsys.readouterr().err
+    assert "AI completion failed" in err
+    assert "RuntimeError: completion broke" in err
+
+
+async def test_variable_read_failures_are_printed(capsys):
+    vals = await _eval_vars({"x"}, BrokenBridge())
+
+    assert vals["x"] is not None
+    err = capsys.readouterr().err
+    assert "Variable reference failed" in err
+    assert "TimeoutError: kernel shell reply timeout" in err
+
+
+def test_refresh_prompt_prints_invalidate_errors(shell, test_db, capsys):
+    class App:
+        def invalidate(self): raise RuntimeError("redraw broke")
+
+    shell.pt_cli = SimpleNamespace(app=App())
+    ctrl = IPyAIController(shell=shell, db=test_db, session_number=1)
+
+    ctrl._refresh_prompt()
+
+    err = capsys.readouterr().err
+    assert "Prompt redraw failed" in err
+    assert "RuntimeError: redraw broke" in err

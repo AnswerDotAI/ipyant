@@ -52,6 +52,7 @@ class _CodexAppServer:
         self.init_lock = asyncio.Lock()
         self.turn_lock = asyncio.Lock()
         self.initialized = False
+        self.created_thread_ids = set()
 
     async def _start(self):
         if self.proc and self.proc.returncode is None: return
@@ -125,7 +126,9 @@ class _CodexAppServer:
         if sp: params["developerInstructions"] = sp + _HIST_SP
         if dynamic_tools: params["dynamicTools"] = dynamic_tools
         result = await self.request("thread/start", params)
-        return result["thread"]["id"]
+        thread_id = result["thread"]["id"]
+        self.created_thread_ids.add(thread_id)
+        return thread_id
 
     async def resume_thread(self, thread_id, *, sp="", cwd=None):
         await self.ensure_initialized()
@@ -133,6 +136,15 @@ class _CodexAppServer:
         if sp: params["developerInstructions"] = sp + _HIST_SP
         result = await self.request("thread/resume", params)
         return result["thread"]["id"]
+
+    async def archive_thread(self, thread_id):
+        if not thread_id: return
+        await self.ensure_initialized()
+        await self.request("thread/archive", dict(threadId=thread_id))
+        self.created_thread_ids.discard(thread_id)
+
+    async def archive_threads(self, thread_ids):
+        for thread_id in sorted(set(thread_ids)): await self.archive_thread(thread_id)
 
     async def turn_stream(self, thread_id, prompt, *, tools=None, think=None, output_schema=None, cwd=None):
         async with self.turn_lock:
