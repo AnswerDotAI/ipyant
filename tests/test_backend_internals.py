@@ -8,7 +8,7 @@ from safepyrun import RunPython
 import ipyai.claude_client as claude
 import ipyai.codex_client as codex
 from ipyai.api_client import AsyncStreamFormatter, _BridgeNS
-from ipyai.backend_common import COMPLETION_THINK
+from ipyai.backend_common import COMPLETION_THINK, compact_tool, tool_call
 from ipyai.mcp_server import ToolSocketServer
 from ipyai.tooling import ToolRegistry
 
@@ -30,6 +30,38 @@ async def _run_api(items):
 
     async for chunk in fmt.format_stream(_agen()): out.append(chunk)
     return fmt, out
+
+
+def test_tool_call_truncates_long_param_values():
+    "Long arg values must be truncated for display so the 🔧 line stays readable; short values render unchanged."
+    assert tool_call("pyrun", dict(code="1+1")) == "pyrun(code='1+1')"
+    long = "x" * 5000
+    rendered = tool_call("pyrun", dict(code=long))
+    assert long not in rendered, f"long arg must not appear verbatim: {rendered!r}"
+    assert "…" in rendered or "..." in rendered, f"truncation marker expected: {rendered!r}"
+    assert len(rendered) < 100, f"rendered tool_call must be short, got {len(rendered)} chars"
+
+
+def test_compact_tool_truncates_args_in_display_summary():
+    "compact_tool() feeds the 🔧 line; its args section must be truncated."
+    long = "y" * 3000
+    summary = compact_tool("pyrun", dict(code=long), "ok")
+    assert long not in summary, f"full arg should not leak into compact_tool: {summary!r}"
+    assert "🔧 pyrun(" in summary
+
+
+def test_api_display_truncates_long_tool_args_but_outp_keeps_full():
+    "In api_client display path the compact 🔧 line must show truncated args, while outp (LLM-facing) keeps the full args via mk_tr_details."
+    long = "z" * 3000
+    arguments = json.dumps({"code": long})
+    resp = _resp_with_tc(call_id="call_3", name="pyrun", arguments=arguments)
+    tool_msg = {"tool_call_id": "call_3", "content": "ok"}
+    fmt,out = asyncio.run(_run_api([resp, tool_msg]))
+    joined = "".join(out)
+
+    assert long not in joined, "display must not contain the full arg"
+    assert long not in fmt.display_text
+    assert long in fmt.outp, "outp must keep full arg for LLM replay"
 
 
 def test_api_tool_start_marker_suppressed_in_display_and_outp():

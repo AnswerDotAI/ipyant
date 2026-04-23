@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Literal
 
+from lisette.core import trunc_param
+
 from .tooling import ToolRegistry
 
 _THINK_RE = re.compile(r"<thinking>\n.*?\n</thinking>\n*", flags=re.DOTALL)
@@ -97,9 +99,10 @@ def replayable_assistant_text(text):
 def tool_name(name): return _TOOL_PREFIX_RE.sub("", name or "")
 
 
-def tool_call(name, args):
+def tool_call(name, args, mx=40):
     name = tool_name(name)
-    return f"{name}()" if not args else f"{name}({', '.join(f'{k}={v!r}' for k,v in sorted(args.items()))})"
+    if not args: return f"{name}()"
+    return f"{name}({', '.join(f'{k}={trunc_param(v, mx=mx)}' for k,v in sorted(args.items()))})"
 
 
 def compact_tool(name, args, result, is_error=False, max_len=100):
