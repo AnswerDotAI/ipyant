@@ -84,6 +84,12 @@ class BrokenBridge:
     async def read_var(self, name): raise TimeoutError("kernel shell reply timeout")
 
 
+class HistorySuggest:
+    def get_suggestion(self, buffer, document):
+        from prompt_toolkit.auto_suggest import Suggestion
+        return Suggestion("_history")
+
+
 async def test_base_backend_complete_enforces_tool_off_ephemeral_policy(shell):
     backend = DummyBackend(shell=shell)
 
@@ -170,6 +176,30 @@ async def test_ai_suggest_prints_background_errors(shell, test_db, capsys):
     err = capsys.readouterr().err
     assert "AI completion failed" in err
     assert "RuntimeError: completion broke" in err
+
+
+async def test_ai_suggest_overrides_history_suggestion(shell, test_db):
+    from prompt_toolkit.document import Document
+    pt = SimpleNamespace(auto_suggest=HistorySuggest(), key_bindings=FakeKeyBindings())
+    shell.pt_cli = pt
+    ctrl = IPyAIController(shell=shell, db=test_db, session_number=1)
+
+    async def _complete(doc): return "_ai"
+    ctrl._ai_complete = _complete
+    ctrl._register_keybindings()
+
+    tasks = []
+    app = SimpleNamespace(create_background_task=tasks.append, invalidate=lambda: None)
+    doc = Document("pri")
+    buf = SimpleNamespace(document=doc, suggestion=pt.auto_suggest.get_suggestion(SimpleNamespace(history=None), doc))
+    event = SimpleNamespace(current_buffer=buf, app=app)
+
+    assert buf.suggestion.text == "_history"
+    pt.key_bindings.handlers[("escape", ".")](event)
+    await tasks[0]
+
+    assert buf.suggestion.text == "_ai"
+    assert pt.auto_suggest.get_suggestion(buf, doc).text == "_ai"
 
 
 async def test_variable_read_failures_are_printed(capsys):

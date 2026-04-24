@@ -47,6 +47,20 @@ class IPyAIHistory(History):
     def store_string(self, string): pass
 
 
+def install_history_autosuggest(pt):
+    "Attach IPython's history autosuggest provider to a prompt_toolkit PromptSession."
+    if pt is None: return None
+    provider = getattr(pt, "auto_suggest", None)
+    if provider is None:
+        from IPython.terminal.shortcuts.auto_suggest import NavigableAutoSuggestFromHistory
+        provider = NavigableAutoSuggestFromHistory()
+        pt.auto_suggest = provider
+    if hasattr(provider, "connect") and hasattr(pt, "default_buffer") and getattr(pt, "_ipyai_auto_suggest_provider", None) is not provider:
+        provider.connect(pt)
+        pt._ipyai_auto_suggest_provider = provider
+    return provider
+
+
 MAX_BUFFER_CHARS = 200_000
 _IPYAI_PREFIXES = ("get_ipython().run_cell_magic('ipyai'", 'get_ipython().run_cell_magic("ipyai"', "get_ipython().run_line_magic('ipyai'",
     'get_ipython().run_line_magic("ipyai"', "%ipyai", "%%ipyai")
@@ -66,6 +80,7 @@ class IPyAIShell(ZMQTerminalInteractiveShell):
     output_buffer = TAny()
     _ipyai_bridge = TAny(default_value=None, allow_none=True)
     _ipyai_controller = TAny(default_value=None, allow_none=True)
+    auto_suggest = TAny(default_value=None, allow_none=True)
     user_ns = TAny()
     input_transformer_manager = TAny()
     display_pub = TAny()
@@ -91,6 +106,10 @@ class IPyAIShell(ZMQTerminalInteractiveShell):
 
     def register_magics(self, magics):
         "No-op. Our run_cell override intercepts ipyai magics directly; no magic-dispatch machinery on the client."
+
+    def init_prompt_toolkit_cli(self):
+        super().init_prompt_toolkit_cli()
+        self.auto_suggest = install_history_autosuggest(getattr(self, "pt_cli", None))
 
     def handle_rich_data(self, data):
         if "text/markdown" in data:

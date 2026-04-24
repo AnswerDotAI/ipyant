@@ -1,12 +1,14 @@
 "Fast pure-unit tests: input transforms, session listing, CLI backend-default injection, and IPyAIHistory."
 import json, os
+from types import SimpleNamespace
 
 from IPython.core.inputtransformer2 import TransformerManager
+from prompt_toolkit.document import Document
 
 from ipyai.backends import BACKEND_CLAUDE_CLI, BACKEND_CODEX
 from ipyai.cli import _default_backend
 from ipyai.core import SESSIONS_TABLE, _list_sessions, _resume_command, prompt_from_lines, transform_dots
-from ipyai.shell import IPyAIHistory
+from ipyai.shell import IPyAIHistory, install_history_autosuggest
 
 
 def test_prompt_from_lines_and_transform_dots():
@@ -57,9 +59,9 @@ def test_default_backend_prepends_when_no_flag():
 
 
 def test_default_backend_preserves_explicit_flag():
-    for argv in [["-b", "codex"], ["-b=codex"], ["--backend", "codex"], ["--backend=codex"],
-                 ["--IPyAIApp.backend=codex"], ["-p", "-b", "claude-cli"]]:
-        assert _default_backend(argv, "claude-api") == argv, argv
+    cases = [["-b", "codex"], ["-b=codex"], ["--backend", "codex"], ["--backend=codex"],
+        ["--IPyAIApp.backend=codex"], ["-p", "-b", "claude-cli"]]
+    for argv in cases: assert _default_backend(argv, "claude-api") == argv, argv
 
 
 def _seed_mixed_history(db):
@@ -83,11 +85,29 @@ def test_history_adapter_filters_by_prompt_mode(test_db):
     mode = [None]
     hist = IPyAIHistory(test_db, session_number=2, mode_fn=lambda: mode[0])
 
-    mode[0] = "prompt"; hist._loaded = False
+    mode[0] = "prompt"
+    hist._loaded = False
     assert list(hist.load_history_strings()) == ["new session hi", "explain x"]
 
-    mode[0] = "code"; hist._loaded = False
+    mode[0] = "code"
+    hist._loaded = False
     assert list(hist.load_history_strings()) == ["2+1", "x = 42", "import pandas"]
 
-    mode[0] = None; hist._loaded = False
+    mode[0] = None
+    hist._loaded = False
     assert list(hist.load_history_strings()) == ["2+1", "new session hi", "explain x", "x = 42", "import pandas"]
+
+
+def test_history_autosuggest_uses_ipython_provider_and_ipyai_history(test_db):
+    with test_db:
+        test_db.execute("INSERT INTO history (session, line, source, source_raw) VALUES (1,1,'print(1)','print(1)')")
+        test_db.execute("INSERT INTO history (session, line, source, source_raw) VALUES (1,2,'print(2)','print(2)')")
+    hist = IPyAIHistory(test_db, session_number=1)
+    pt = SimpleNamespace(auto_suggest=None)
+
+    provider = install_history_autosuggest(pt)
+    suggestion = provider.get_suggestion(SimpleNamespace(history=hist), Document("pri"))
+
+    assert type(provider).__name__ == "NavigableAutoSuggestFromHistory"
+    assert pt.auto_suggest is provider
+    assert suggestion.text == "nt(2)"
