@@ -6,7 +6,7 @@ from litellm.types.utils import Choices, Message, ModelResponse
 from safepyrun import RunPython
 
 import ipyai.claude_client as claude, ipyai.codex_client as codex
-from ipyai.api_client import AsyncStreamFormatter, _BridgeNS
+from ipyai.api_client import AsyncStreamFormatter, CodexAPIBackend, _BridgeNS
 from ipyai.backend_common import COMPLETION_THINK, compact_tool, tool_call
 from ipyai.mcp_server import ToolSocketServer
 from ipyai.tooling import ToolRegistry
@@ -61,6 +61,18 @@ def test_api_display_truncates_long_tool_args_but_outp_keeps_full():
     assert long not in joined, "display must not contain the full arg"
     assert long not in fmt.display_text
     assert long in fmt.outp, "outp must keep full arg for LLM replay"
+
+
+def test_codex_api_backend_uses_chatgpt_provider_via_async_chat(shell):
+    "CodexChat has been replaced by AsyncChat + codex model aliases (chatgpt/* via LiteLLM). Unprefixed names get `chatgpt/` prefixed so existing configs like 'gpt-5.4' keep working; already-resolved `chatgpt/...` passes through untouched."
+    from lisette.core import AsyncChat as LisetteAsyncChat, codex55
+    backend = CodexAPIBackend(shell=shell)
+    chat = backend._make_chat(model="gpt-5.4", sp="", hist=None, ns={}, tools=None)
+    assert isinstance(chat, LisetteAsyncChat), f"expected LisetteAsyncChat, got {type(chat).__name__}"
+    assert chat.model == "chatgpt/gpt-5.4", f"short model must be prefixed with chatgpt/: {chat.model!r}"
+
+    chat2 = backend._make_chat(model=codex55, sp="", hist=None, ns={}, tools=None)
+    assert chat2.model == codex55, f"already-resolved alias must pass through: {chat2.model!r}"
 
 
 def test_api_tool_start_marker_suppressed_in_display_and_outp():

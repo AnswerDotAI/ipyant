@@ -2,7 +2,7 @@ import json, warnings
 
 from litellm.types.utils import ModelResponse
 from lisette.core import (AsyncChat as LisetteAsyncChat, AsyncStreamFormatter as LisetteAsyncStreamFormatter,
-    CodexChat, contents, mk_tr_details)
+    contents, mk_tr_details)
 
 from .backend_common import BaseBackend, ConversationSeed, compact_tool, seed_to_flat_history
 
@@ -76,4 +76,7 @@ class ClaudeAPIBackend(_LisetteBackend):
 
 
 class CodexAPIBackend(_LisetteBackend):
-    def _make_chat(self, **kw): return CodexChat(useasync=True, **kw)
+    "Codex API backend via lisette `AsyncChat` + chatgpt provider aliases (codex54/codex55 resolve to `chatgpt/gpt-5.x`). Short config names like 'gpt-5.4' are auto-prefixed with `chatgpt/` for backward compat."
+    def _make_chat(self, model, **kw):
+        if "/" not in model: model = f"chatgpt/{model}"
+        return LisetteAsyncChat(model=model, **kw)
