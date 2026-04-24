@@ -257,13 +257,18 @@ async def _astream_to_live_markdown(chunks, out, code_theme, formatter=None, par
             if not current: continue
             renderable = _markdown_renderable(_display_text(current), code_theme, markdown_cls)
             if live is None:
-                live_cm = live_cls(renderable, console=console, auto_refresh=False, transient=False, redirect_stdout=True, redirect_stderr=False,
-                    vertical_overflow="visible")
+                live_cm = live_cls(renderable, console=console, auto_refresh=False, transient=True, redirect_stdout=False, redirect_stderr=False,
+                    vertical_overflow="ellipsis")
                 live = live_cm.__enter__()
             else: live.update(renderable, refresh=True)
     finally:
         if live_cm is not None: live_cm.__exit__(None, None, None)
-    return getattr(formatter, "final_text", text)
+    final_text = getattr(formatter, "final_text", text)
+    final_display = getattr(formatter, "display_text", "") or final_text
+    if final_display:
+        console.print(_markdown_renderable(_display_text(final_display), code_theme, markdown_cls))
+        out.flush()
+    return final_text
 
 
 async def astream_to_stdout(stream, formatter_cls: Callable[..., CommonStreamFormatter]=CommonStreamFormatter, out=None,

@@ -4,11 +4,12 @@ from types import SimpleNamespace
 
 from IPython.core.inputtransformer2 import TransformerManager
 from prompt_toolkit.document import Document
+from prompt_toolkit.key_binding import KeyBindings
 
 from ipyai.backends import BACKEND_CLAUDE_CLI, BACKEND_CODEX
 from ipyai.cli import _default_backend
 from ipyai.core import SESSIONS_TABLE, _list_sessions, _resume_command, prompt_from_lines, transform_dots
-from ipyai.shell import IPyAIHistory, install_history_autosuggest
+from ipyai.shell import IPyAIHistory, install_history_autosuggest, install_open_editor_binding
 
 
 def test_prompt_from_lines_and_transform_dots():
@@ -111,3 +112,17 @@ def test_history_autosuggest_uses_ipython_provider_and_ipyai_history(test_db):
     assert type(provider).__name__ == "NavigableAutoSuggestFromHistory"
     assert pt.auto_suggest is provider
     assert suggestion.text == "nt(2)"
+
+
+def test_open_editor_binding_reuses_ipython_f2_handler():
+    called = []
+    kb = KeyBindings()
+    pt = SimpleNamespace(key_bindings=kb, tempfile_suffix="")
+    buf = SimpleNamespace(open_in_editor=lambda: called.append("opened"))
+
+    install_open_editor_binding(pt)
+    binding = next(o for o in kb.bindings if tuple(k.value for k in o.keys) == ("f2",))
+    binding.handler(SimpleNamespace(app=SimpleNamespace(current_buffer=buf)))
+
+    assert called == ["opened"]
+    assert pt.tempfile_suffix == ".py"

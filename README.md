@@ -40,7 +40,7 @@ and failure cases
 
 **Prompt mode** — When prompt mode is on, *every* line you type is sent as an AI prompt by default. To run normal Python code instead, prefix the line with `;`. Shell commands (`!`) and magics (`%`) still work as usual. There are three ways to enable prompt mode:
 
-- **`opt-p`** (Alt-p) — toggle prompt mode on/off at any time from the terminal
+- **`Alt-p`** — toggle prompt mode on/off at any time from the terminal
 - **`-p` flag** — start ipyai in prompt mode: `ipyai -p`
 - **`prompt_mode` config** — set `"prompt_mode": true` in `config.json` to always start in prompt mode
 
@@ -150,9 +150,11 @@ Backend restore is backend-specific:
 
 ## Keyboard Shortcuts
 
-- `Alt-.`: AI inline completion
+- History ghost text: matching recent input appears as a grey suggestion; accept with Right, Ctrl-F, or Ctrl-E
+- `Alt-.`: AI inline completion, overriding any visible history suggestion
 - `Alt-p`: toggle prompt mode
 - `Alt-Up/Down`: history navigation
+- `F2`: open the current input in `$EDITOR` as a temporary Python file
 - `Alt-Shift-W`: paste all Python code blocks from the last response
 - `Alt-Shift-1` through `Alt-Shift-9`: paste the Nth Python code block
 - `Alt-Shift-Up/Down`: cycle through extracted Python blocks

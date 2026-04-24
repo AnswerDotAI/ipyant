@@ -61,6 +61,20 @@ def install_history_autosuggest(pt):
     return provider
 
 
+def install_open_editor_binding(pt):
+    "Attach IPython's F2 open-in-editor handler to a prompt_toolkit PromptSession."
+    if pt is None or getattr(pt, "_ipyai_open_editor_bound", False): return None
+    kb = getattr(pt, "key_bindings", None)
+    if kb is None: return None
+    from IPython.terminal.shortcuts import open_input_in_editor
+    from prompt_toolkit.enums import DEFAULT_BUFFER
+    from prompt_toolkit.filters import has_focus
+    kb.add("f2", filter=has_focus(DEFAULT_BUFFER))(open_input_in_editor)
+    if not getattr(pt, "tempfile_suffix", None): pt.tempfile_suffix = ".py"
+    pt._ipyai_open_editor_bound = True
+    return open_input_in_editor
+
+
 MAX_BUFFER_CHARS = 200_000
 _IPYAI_PREFIXES = ("get_ipython().run_cell_magic('ipyai'", 'get_ipython().run_cell_magic("ipyai"', "get_ipython().run_line_magic('ipyai'",
     'get_ipython().run_line_magic("ipyai"', "%ipyai", "%%ipyai")
@@ -110,6 +124,7 @@ class IPyAIShell(ZMQTerminalInteractiveShell):
     def init_prompt_toolkit_cli(self):
         super().init_prompt_toolkit_cli()
         self.auto_suggest = install_history_autosuggest(getattr(self, "pt_cli", None))
+        install_open_editor_binding(getattr(self, "pt_cli", None))
 
     def handle_rich_data(self, data):
         if "text/markdown" in data:
