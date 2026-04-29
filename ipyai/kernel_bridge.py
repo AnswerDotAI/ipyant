@@ -55,19 +55,21 @@ class KernelBridge:
         self.client = client
         self._schemas = None
         self._names = None
+        self._exec_lock = asyncio.Lock()  # shell/iopub channels are shared across all execute requests
 
     async def _exec(self, code, *, expressions=None, capture_stream=False, timeout=_EXEC_TIMEOUT):
-        msg_id = self.client.execute(code, silent=True, store_history=False, user_expressions=expressions or {})
-        stream = [] if capture_stream else None
-        iop = asyncio.create_task(_drain_iopub_until_idle(self.client, msg_id, stream, timeout=timeout))
-        reply = await _get_shell_reply(self.client, msg_id, timeout=timeout)
-        try: await iop
-        except Exception: iop.cancel()
-        content = reply["content"]
-        if content.get("status") != "ok":
-            raise RuntimeError(content.get("evalue") or content.get("ename") or "kernel execute failed")
-        exprs = {k: _expr_value(v) for k,v in (content.get("user_expressions") or {}).items()}
-        return exprs, "".join(stream) if stream is not None else ""
+        async with self._exec_lock:
+            msg_id = self.client.execute(code, silent=True, store_history=False, user_expressions=expressions or {})
+            stream = [] if capture_stream else None
+            iop = asyncio.create_task(_drain_iopub_until_idle(self.client, msg_id, stream, timeout=timeout))
+            reply = await _get_shell_reply(self.client, msg_id, timeout=timeout)
+            try: await iop
+            except Exception: iop.cancel()
+            content = reply["content"]
+            if content.get("status") != "ok":
+                raise RuntimeError(content.get("evalue") or content.get("ename") or "kernel execute failed")
+            exprs = {k: _expr_value(v) for k,v in (content.get("user_expressions") or {}).items()}
+            return exprs, "".join(stream) if stream is not None else ""
 
     async def present_names(self, names):
         "Return subset of `names` already defined and callable in the kernel's user_ns."

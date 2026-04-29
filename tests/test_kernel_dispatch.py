@@ -45,6 +45,47 @@ def test_call_tool_uses_longer_timeout_than_probe_exec(kernel_bridge, kernel_loo
     kernel_loop.run_until_complete(_go())
 
 
+def test_exec_serializes_concurrent_requests(kernel_loop):
+    import ipyai.kernel_bridge as kb
+
+    class FakeClient:
+        def __init__(self):
+            self.shell_q = asyncio.Queue()
+            self.iopub_q = asyncio.Queue()
+            self.exec_count = 0
+            self.inflight = 0
+            self.max_inflight = 0
+
+        def execute(self, code, silent=True, store_history=False, user_expressions=None):
+            self.exec_count += 1
+            msg_id = f"msg_{self.exec_count}"
+            self.inflight += 1
+            self.max_inflight = max(self.max_inflight, self.inflight)
+
+            async def _respond():
+                await asyncio.sleep(0.01)
+                await self.shell_q.put(dict(parent_header=dict(msg_id=msg_id), content=dict(status="ok", user_expressions={})))
+                await asyncio.sleep(0.01)
+                await self.iopub_q.put(dict(parent_header=dict(msg_id=msg_id), msg_type="status",
+                    content=dict(execution_state="idle")))
+                self.inflight -= 1
+
+            asyncio.create_task(_respond())
+            return msg_id
+
+        async def get_shell_msg(self): return await self.shell_q.get()
+
+        async def get_iopub_msg(self): return await self.iopub_q.get()
+
+    async def _go():
+        client = FakeClient()
+        bridge = kb.KernelBridge(client)
+        await asyncio.gather(bridge._exec(""), bridge._exec(""))
+        assert client.max_inflight == 1, f"_exec calls must serialize on the shared kernel channels: {client.max_inflight=}"
+
+    kernel_loop.run_until_complete(_go())
+
+
 def test_bridge_preserves_full_response_from_kernel_tool(kernel_bridge, kernel_loop, monkeypatch):
     "A kernel-side tool that opts out of truncation with `FullResponse` must have its type preserved across the bridge — otherwise lisette's `_trunc_str` will truncate it on replay."
     import ipyai.kernel_bridge as kb
